@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+
+# Swift Package Manager
+.build/
+
+# Xcode
+build/
+DerivedData/
+*.xcuserstate
+*.xcscmblueprint
+xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# ASR ランタイム生成物（もし repo 内に置いた場合の保険）
+asr/.venv/
+asr/__pycache__/
+asr/api-key.txt
+asr/server.log
