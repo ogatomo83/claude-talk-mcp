@@ -12,6 +12,9 @@ DerivedData/
 xcuserdata/
 *.xcworkspace/xcuserdata/
 
+# Claude Code のローカル作業領域（worktree・設定・キャッシュ）
+.claude/
+
 # ASR ランタイム生成物（もし repo 内に置いた場合の保険）
 asr/.venv/
 asr/__pycache__/
