@@ -89,11 +89,29 @@ claude mcp add claude-talk -- /ABSOLUTE/PATH/claude-talk-mcp/MCPServer/.build/re
 
 登録後、`speak` と `listen` の 2 ツールが使えるようになります。
 
+### 4. `/voice` スキルの導入
+
+`speak` / `listen` を往復ループとして使う `/voice` スキルを `~/.claude/skills/` に置きます。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ogatomo83/claude-talk-mcp/main/install-skills.sh | sh
+```
+
+リポジトリを clone 済みなら `./install-skills.sh` でも同じです（ローカルの `skills/` をコピーします）。既存の skill があり中身が違う場合は `voice.bak.<日時>` に退避してから置き換えます。実行後は Claude Code を再起動してください。
+
+環境変数で挙動を変えられます。
+
+| 変数 | 既定 | 内容 |
+|------|------|------|
+| `SKILLS_DIR` | `~/.claude/skills` | 配置先 |
+| `REF` | `main` | 取得するブランチ / タグ |
+| `SKILLS` | `voice` | 入れる skill 名（スペース区切り） |
+
 ## 使い方
 
 1. 音声アプリを起動しておく（メニューバーに常駐）。
 2. MCP サーバーを登録した Claude クライアントから会話する。
-3. 付属の `/voice` スキル（`~/.claude/skills/voice`）を使うと、読み上げ→聞き取り→また読み上げ…と往復ループになります。合図（「どうぞ」等）の直後に話し始めても、**プリロール録音**により頭から認識されます。
+3. `/voice` スキルを使うと、読み上げ→聞き取り→また読み上げ…と往復ループになります。合図（「どうぞ」等）の直後に話し始めても、**プリロール録音**により頭から認識されます。
 
 メニューバーのポップオーバーには現在の状態（待機中／読み上げ中／聞き取り中／音声を生成中／AIが認識中）とログが表示されます。
 
