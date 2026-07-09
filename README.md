@@ -58,6 +58,27 @@ swift build -c release
 xcodebuild -project claude-talk-mcp.xcodeproj -scheme claude-talk-mcp -configuration Debug build
 ```
 
+### まとめてコマンドラインでビルド（Xcode 不要）
+
+`make` で MCP サーバーとアプリを一括ビルドし、`dist/` に出力します。
+
+```bash
+make build      # → dist/claude-talk-mcp.app, dist/claude-talk-mcp-server
+make zip        # → dist/claude-talk-mcp-app-macos.zip（配布用）
+make clean
+```
+
+アプリはアドホック署名（`Signature=adhoc`）で出力され、マイク用 entitlement も埋め込まれます。
+
+## ビルド済みのダウンロード
+
+[Releases](../../releases) からビルド済みの `.app`（zip）と MCP サーバーバイナリを入手できます。
+
+- **自動**：タグ（`v*`）を push すると GitHub Actions（`.github/workflows/release.yml`）が macOS でビルドして Release を作成します。手動実行時は Actions のアーティファクトとしてもダウンロードできます。
+- **手元から**：`make release VERSION=v0.1.0`（`gh` 認証が必要）。
+
+> 配布アプリは**アドホック署名（未 notarize）**のため、初回起動時に Gatekeeper が「開発元を確認できません」と警告します。**Finder で右クリック →「開く」**で一度許可すれば以後は通常起動できます。ASR サーバーは別途 `./asr/setup.sh` が必要です。CI ランナーは macOS 26 SDK / Xcode 26 が必要で、未対応なら手元の `make release` を使ってください。
+
 ## Claude への登録（MCP）
 
 ビルドした MCP サーバーのバイナリを MCP クライアントに登録します。Claude Code の例:
