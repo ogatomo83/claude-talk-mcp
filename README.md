@@ -40,6 +40,28 @@ macOS で **Claude と日本語の音声で会話**するための仕組み。Cl
 
 `~/.claude-talk-mcp/asr/` に Python 仮想環境を作り、`mlx-qwen3-asr[serve]` を導入、サーバースクリプトとローカル用 API キーを配置します。初回起動時にモデル（約 3.4GB）が自動ダウンロードされます。音声アプリが自動起動するので、通常は手動起動不要です。
 
+#### 1'. speech.cpp + Haas‑ja‑v1.0（軽量な日本語専用 STT、任意）
+
+```bash
+./asr/setup-speechcpp.sh
+```
+
+[speech.cpp](https://github.com/nyosegawa/speech.cpp) を公式インストーラで `~/.local/bin/speech` に入れ、[Haas-ja-v1.0](https://huggingface.co/third-intelligence/Haas-ja-v1.0) の F16 の重み（1.23 GB）を取得し、`~/.claude-talk-mcp/asr/backend` を `speechcpp` にします。メモリは約 1.2 GB（Qwen3‑ASR は約 4.6 GB、ピーク 11.9 GB）。
+
+エンジンは `~/.claude-talk-mcp/asr/backend` の 1 語で切り替えます（`start-server.sh` と音声アプリの両方が読む。無ければ `qwen3`）。
+
+| backend | サーバー | 送る language |
+|---|---|---|
+| `speechcpp` | `speech serve haas-ja-v1.0:f16 --host 127.0.0.1 --port 8765 --language ja` | `ja` |
+| `qwen3` | `asr_server.py`（Qwen3‑ASR‑1.7B, MLX） | `Japanese` |
+
+切り替えたら、動いているサーバーを止めます（次の listen で音声アプリが起動し直す）:
+
+```bash
+echo qwen3 > ~/.claude-talk-mcp/asr/backend      # または speechcpp
+kill $(lsof -nP -t -iTCP:8765 -sTCP:LISTEN)
+```
+
 ### 2. MCP サーバー（Swift Package）
 
 ```bash

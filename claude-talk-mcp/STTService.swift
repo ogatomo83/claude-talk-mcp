@@ -249,7 +249,9 @@ final class STTService {
         var padded = Data(count: padBytes)
         padded.append(pcm16)
         let wav = STTService.wavData(fromPCM16: padded)
-        let language = Self.asrLanguage(for: captureLocale)
+        let language = client.backend == .speechCpp
+            ? Self.isoLanguage(for: captureLocale)
+            : Self.asrLanguage(for: captureLocale)
         // AI へ送って認識するフェーズ。
         onPhase?(.transcribing)
         Task { [weak self] in
@@ -362,6 +364,12 @@ final class STTService {
         return "Japanese"
     }
 
+    /// ロケール(ja-JP) → speech.cpp の language タグ(ja)。Haas-ja-v1.0 は ja だけを受け付ける。
+    private static func isoLanguage(for locale: String) -> String {
+        let tag = locale.lowercased().split(whereSeparator: { $0 == "-" || $0 == "_" }).first.map(String.init)
+        return tag ?? "ja"
+    }
+
     // MARK: - Authorization
 
     private static func requestMicrophoneAuthorization() async -> Bool {
@@ -382,12 +390,29 @@ final class STTService {
 
 // MARK: - Qwen3-ASR HTTP クライアント
 
-/// `~/.claude-talk-mcp/asr` のローカル Qwen3-ASR サーバと話すクライアント。
+/// `~/.claude-talk-mcp/asr` のローカル音声認識サーバと話すクライアント。
 ///
 /// OpenAI 互換の `POST /v1/audio/transcriptions`（multipart）へ WAV を送り、
 /// `{"text": "..."}` を受け取る。未起動なら start-server.sh を起動して待つ。
+///
+/// サーバのエンジンは `~/.claude-talk-mcp/asr/backend` の 1 語で決まる（start-server.sh と共通）:
+/// - `speechcpp` … speech.cpp の `speech serve` + Haas-ja-v1.0。language は `ja` 形式（認証なし。Bearer は無視される）
+/// - `qwen3`（ファイルが無い時も）… 自作 FastAPI + Qwen3-ASR-1.7B。language は `Japanese` 形式、Bearer キー
 struct ASRClient {
+    enum Backend {
+        case qwen3
+        case speechCpp
+    }
+
     let baseURL = URL(string: "http://127.0.0.1:8765")!
+
+    /// 今の設定のエンジン。録音のたびに読むので、ファイルを書き換えてもアプリの再起動は要らない。
+    var backend: Backend {
+        let raw = (try? String(contentsOf: asrDirectory.appendingPathComponent("backend"), encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return raw == "speechcpp" ? .speechCpp : .qwen3
+    }
 
     private var asrDirectory: URL {
         FileManager.default.homeDirectoryForCurrentUser
