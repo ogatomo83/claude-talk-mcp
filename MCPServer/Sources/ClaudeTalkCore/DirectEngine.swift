@@ -23,6 +23,7 @@ public actor DirectEngine {
     private var idleToken = 0
     private var busy = 0
     private var speaker: Speaker?
+    private let irodori = IrodoriSpeaker()
     private let makeInput: @Sendable () throws -> AudioInput
 
     public init(makeInput: (@Sendable () throws -> AudioInput)? = nil) {
@@ -35,8 +36,22 @@ public actor DirectEngine {
     // MARK: - 起動時
 
     /// direct モードで起動した時に呼ぶ: speech serve を先に温めておく (初回 listen の待ちを減らす)。
+    /// 読み上げが irodori なら、その serve も並行して起こす。
     public func prewarm() async {
         let (settings, _) = DirectSettings.load()
+        let log = self.log
+        if settings.ttsEngine == .irodori {
+            Task.detached {
+                let sw = Stopwatch()
+                do {
+                    let started = try await TTSServer(settings: settings)
+                        .ensureRunning(timeout: settings.serverStartTimeoutSeconds)
+                    log.event("tts.prewarm", mode: .direct, fields: ["ms": sw.ms, "started": started])
+                } catch {
+                    log.event("tts.prewarm", mode: .direct, fields: ["ms": sw.ms, "error": "\(error.localizedDescription)"])
+                }
+            }
+        }
         let sw = Stopwatch()
         do {
             let started = try await SpeechServer(settings: settings).ensureRunning()
@@ -48,10 +63,16 @@ public actor DirectEngine {
 
     // MARK: - speak
 
+    /// 読み上げ。settings.tts が irodori なら speech serve (Irodori) で、届いた音をそばから鳴らし、鳴り終わってから返る。
+    /// Irodori の serve が立たない・まだ何も鳴らないうちに失敗した時は avspeech に落とす (timing.jsonl に speak.fallback)。
+    /// voice に AVSpeech の identifier (com.apple.…) を渡した時は、その回だけ avspeech。
     public func speak(text: String, voice: String?, rate: Double?, locale: String) async throws -> Bool {
-        let (settings, _) = DirectSettings.load()
+        let (settings, warning) = DirectSettings.load()
         let sw = Stopwatch()
-        log.event("speak.recv", mode: .direct, fields: ["chars": text.count])
+        var kind = settings.ttsEngine
+        if let voice, voice.hasPrefix("com.apple.") { kind = .avspeech }
+        log.event("speak.recv", mode: .direct, fields: ["chars": text.count, "tts": kind.rawValue]
+                  .merging(warning.map { ["warning": $0] } ?? [:]) { a, _ in a })
         busy += 1
         defer {
             busy -= 1
@@ -62,17 +83,65 @@ public actor DirectEngine {
             try? startInput()
         }
         speakEndAt = nil
-        if speaker == nil { speaker = await Speaker() }
-        let log = self.log
-        let finished = await speaker!.speak(text: text, voice: voice ?? settings.voice, rate: rate ?? settings.rate,
-                                            locale: locale) {
-            log.event("speak.audio_start", mode: .direct, fields: ["ms": sw.ms])
+        var finished = false
+        var used = kind
+        if kind == .irodori {
+            do {
+                finished = try await speakIrodori(text: text, settings: settings, sw: sw)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let f as IrodoriFailure where f.audioStarted {
+                // 途中まで鳴った後の失敗は、avspeech で読み直さない (同じ文を 2 度読まない)。
+                speakEndAt = PCM.now()
+                input?.trigger("speak_done")
+                log.event("speak.done", mode: .direct, fields: ["ms": sw.ms, "finished": false, "tts": "irodori",
+                                                                "error": f.localizedDescription])
+                throw f
+            } catch {
+                log.event("speak.fallback", mode: .direct, fields: ["ms": sw.ms, "from": "irodori", "to": "avspeech",
+                                                                    "error": error.localizedDescription])
+                used = .avspeech
+            }
+        }
+        if used == .avspeech {
+            finished = await speakAV(text: text, voice: voice ?? settings.voice, rate: rate ?? settings.rate,
+                                     locale: locale, sw: sw)
         }
         speakEndAt = PCM.now()
         input?.trigger("speak_done")
-        log.event("speak.done", mode: .direct, fields: ["ms": sw.ms, "finished": finished])
+        log.event("speak.done", mode: .direct, fields: ["ms": sw.ms, "finished": finished, "tts": used.rawValue])
         try Task.checkCancellation()
         return finished
+    }
+
+    private func speakAV(text: String, voice: String?, rate: Double?, locale: String, sw: Stopwatch) async -> Bool {
+        if speaker == nil { speaker = await Speaker() }
+        let log = self.log
+        return await speaker!.speak(text: text, voice: voice, rate: rate, locale: locale) {
+            log.event("speak.audio_start", mode: .direct, fields: ["ms": sw.ms, "tts": "avspeech"])
+        }
+    }
+
+    private func speakIrodori(text: String, settings: DirectSettings, sw: Stopwatch) async throws -> Bool {
+        let swServer = Stopwatch()
+        let started = try await TTSServer(settings: settings).ensureRunning(timeout: settings.ttsStartTimeoutSeconds)
+        log.event("speak.tts_ready", mode: .direct, fields: ["ms": swServer.ms, "started": started])
+        let prepared = Readings.prepare(text, settings: settings)
+        if prepared != text {
+            log.event("speak.readings", mode: .direct, fields: ["chars_before": text.count, "chars_after": prepared.count])
+        }
+        let log = self.log
+        return try await irodori.speak(text: prepared, settings: settings, onTiming: { stage, t in
+            switch stage {
+            case "first_audio":
+                log.event("speak.audio_start", mode: .direct, fields: [
+                    "ms": sw.ms, "tts": "irodori", "first_chunk_ms": t.firstChunkMs ?? -1,
+                    "first_voiced_ms": t.firstVoicedMs ?? -1, "header_ms": t.headerMs ?? -1, "request_ms": t.requestMs ?? -1,
+                    "player_ready_ms": t.playerReadyMs ?? -1])
+            default:
+                log.event("speak.stream_done", mode: .direct, fields: ["ms": sw.ms, "audio_s": (t.audioSeconds * 100).rounded() / 100])
+            }
+        })
     }
 
     // MARK: - listen

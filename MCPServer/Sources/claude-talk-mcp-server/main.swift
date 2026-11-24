@@ -26,7 +26,7 @@ let server = Server(
 
 let speakTool = Tool(
     name: "speak",
-    description: "与えられたテキストを macOS の音声で読み上げる。読み上げ完了まで待機する。",
+    description: "与えられたテキストを読み上げる (direct モードは既定で Irodori-TTS、app モードは macOS の音声)。音が鳴り終わるまで待機する。",
     inputSchema: .object([
         "type": .string("object"),
         "properties": .object([
@@ -36,7 +36,7 @@ let speakTool = Tool(
             ]),
             "voice": .object([
                 "type": .string("string"),
-                "description": .string("音声識別子（未指定はシステム既定）"),
+                "description": .string("macOS の音声識別子 (com.apple.…)。指定するとその回は macOS の音声で読む。未指定は設定の既定"),
             ]),
             "rate": .object([
                 "type": .string("number"),

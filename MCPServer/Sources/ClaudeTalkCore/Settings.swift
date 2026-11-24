@@ -31,6 +31,13 @@ public enum TalkPaths {
     public static var logsDir: URL { home.appendingPathComponent("logs", isDirectory: true) }
     /// 1 往復の各段の時間 (JSON Lines)。
     public static var timingLog: URL { logsDir.appendingPathComponent("timing.jsonl") }
+    /// 読み上げ (Irodori) の speech serve。listen の serve (8766) とは別のプロセス。
+    public static var ttsServeLog: URL { directDir.appendingPathComponent("tts-serve.log") }
+    public static var ttsServeLock: URL { directDir.appendingPathComponent("tts-serve.lock") }
+    public static var ttsServePid: URL { directDir.appendingPathComponent("tts-serve.pid") }
+    /// 読み上げ前の読みの辞書 (1 行 1 語、`表記=読み`)。
+    public static var readingsFile: URL { directDir.appendingPathComponent("readings.txt") }
+    public static var voicesDir: URL { directDir.appendingPathComponent("voices", isDirectory: true) }
 
     public static func ensureDir(_ url: URL) {
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
@@ -94,6 +101,30 @@ public struct DirectSettings: Codable, Equatable, Sendable {
     public var voice: String?
     public var rate: Double?
 
+    // MARK: 読み上げ (speak)
+
+    /// 読み上げの仕組み: `irodori` (speech.cpp の Irodori-TTS、既定) / `avspeech` (macOS の AVSpeechSynthesizer)。
+    /// irodori の serve が立たない・声が無い時は avspeech に落ちて timing.jsonl に `speak.fallback` を書く。
+    public var tts: String = "irodori"
+    /// Irodori の speech serve の待ち受けポート (127.0.0.1 固定)。listen の port とは別のプロセス。
+    public var ttsPort: Int = 8767
+    public var ttsModel: String = "irodori-tts-mf:q5_k"
+    /// serve に `--add-voice 名前=ファイル` で足す声。
+    public var ttsVoiceName: String = "irodori-f-low"
+    public var ttsVoiceFile: String = "~/.claude-talk-mcp/direct/voices/irodori-f-low.voice.gguf"
+    /// 声と話し方の説明文 (Irodori の instructions)。空なら送らない。
+    public var ttsInstructions: String = "落ち着いた低めの女性の声で、ゆっくり穏やかに読み上げてください。"
+    /// Irodori の speed (0.25〜4)。未指定はモデルの既定 (1)。
+    public var ttsSpeed: Double?
+    /// Irodori の seed。未指定は毎回サーバーが選ぶ (声は声ファイルで揃う)。
+    public var ttsSeed: Int?
+    /// TTS の serve の起動を speak が待つ上限。超えたらその回は avspeech (serve は裏で起動を続ける)。
+    public var ttsStartTimeoutSeconds: Double = 20
+    /// 最初の音のデータが届くまでの上限。超えたらその回は avspeech。
+    public var ttsFirstAudioTimeoutSeconds: Double = 10
+    /// 辞書に無い英字の扱い: `auto` (大文字だけの 2〜6 文字はアルファベット読み、ほかはそのまま) / `keep` / `spell`。
+    public var ttsLatin: String = "auto"
+
     public init() {}
 
     enum CodingKeys: String, CodingKey {
@@ -101,6 +132,8 @@ public struct DirectSettings: Codable, Equatable, Sendable {
         case micIdleCloseSeconds, prerollMaxSeconds, prerollLeadSeconds, maxSpeechSeconds
         case serverStartTimeoutSeconds, silentMicCheckSeconds, micNoDataTimeoutSeconds, micLockWaitSeconds
         case voice, rate
+        case tts, ttsPort, ttsModel, ttsVoiceName, ttsVoiceFile, ttsInstructions, ttsSpeed, ttsSeed
+        case ttsStartTimeoutSeconds, ttsFirstAudioTimeoutSeconds, ttsLatin
     }
 
     public init(from decoder: Decoder) throws {
@@ -124,6 +157,17 @@ public struct DirectSettings: Codable, Equatable, Sendable {
         micLockWaitSeconds = try c.decodeIfPresent(Double.self, forKey: .micLockWaitSeconds) ?? d.micLockWaitSeconds
         voice = try c.decodeIfPresent(String.self, forKey: .voice)
         rate = try c.decodeIfPresent(Double.self, forKey: .rate)
+        tts = try c.decodeIfPresent(String.self, forKey: .tts) ?? d.tts
+        ttsPort = try c.decodeIfPresent(Int.self, forKey: .ttsPort) ?? d.ttsPort
+        ttsModel = try c.decodeIfPresent(String.self, forKey: .ttsModel) ?? d.ttsModel
+        ttsVoiceName = try c.decodeIfPresent(String.self, forKey: .ttsVoiceName) ?? d.ttsVoiceName
+        ttsVoiceFile = try c.decodeIfPresent(String.self, forKey: .ttsVoiceFile) ?? d.ttsVoiceFile
+        ttsInstructions = try c.decodeIfPresent(String.self, forKey: .ttsInstructions) ?? d.ttsInstructions
+        ttsSpeed = try c.decodeIfPresent(Double.self, forKey: .ttsSpeed)
+        ttsSeed = try c.decodeIfPresent(Int.self, forKey: .ttsSeed)
+        ttsStartTimeoutSeconds = try c.decodeIfPresent(Double.self, forKey: .ttsStartTimeoutSeconds) ?? d.ttsStartTimeoutSeconds
+        ttsFirstAudioTimeoutSeconds = try c.decodeIfPresent(Double.self, forKey: .ttsFirstAudioTimeoutSeconds) ?? d.ttsFirstAudioTimeoutSeconds
+        ttsLatin = try c.decodeIfPresent(String.self, forKey: .ttsLatin) ?? d.ttsLatin
     }
 
     /// 設定ファイルを読む。無い・壊れている時は既定値 (壊れている時は warning を返す)。
@@ -139,6 +183,16 @@ public struct DirectSettings: Codable, Equatable, Sendable {
     public var speechBinPath: String { (speechBin as NSString).expandingTildeInPath }
     public var baseURL: URL { URL(string: "http://127.0.0.1:\(port)")! }
     public var realtimeURL: URL { URL(string: "ws://127.0.0.1:\(port)/v1/realtime")! }
+
+    /// 読み上げの仕組み (知らない値は irodori)。
+    public var ttsEngine: TTSEngineKind { TTSEngineKind(rawValue: tts.lowercased().trimmingCharacters(in: .whitespaces)) ?? .irodori }
+    public var ttsBaseURL: URL { URL(string: "http://127.0.0.1:\(ttsPort)")! }
+    public var ttsVoiceFilePath: String { (ttsVoiceFile as NSString).expandingTildeInPath }
+}
+
+public enum TTSEngineKind: String, Sendable {
+    case irodori
+    case avspeech
 }
 
 /// Haas の語彙 (keywords)。組み込みの既定 + `keywords.txt` の追加・上書き・削除。
