@@ -99,6 +99,15 @@ public struct AudioPiece: Sendable {
     public let start: UInt64
     public let data: Data
     public var end: UInt64 { start &+ PCM.nanoseconds(bytes: data.count) }
+
+    /// `since` より後の部分 (サンプル境界にそろえる)。全部 `since` 以前なら nil。
+    public func sliced(from since: UInt64) -> AudioPiece? {
+        guard end > since else { return nil }
+        if start >= since { return self }
+        let skip = min(PCM.bytes(nanoseconds: since - start), data.count)
+        let rest = data.subdata(in: skip..<data.count)
+        return rest.isEmpty ? nil : AudioPiece(start: start + PCM.nanoseconds(bytes: skip), data: rest)
+    }
 }
 
 /// 録った音を一定時間ぶん残しておくリング。listen は「この時刻から後」をまとめて受け取り (プリロール)、
@@ -163,18 +172,7 @@ public final class AudioRing: @unchecked Sendable {
         nextId += 1
         subscribers[id] = cont
         var backlog: [AudioPiece] = []
-        for p in pieces where p.end > since {
-            if p.start >= since {
-                backlog.append(p)
-            } else {
-                // 断片の途中から切り出す (サンプル境界にそろえる)。
-                let skip = min(PCM.bytes(nanoseconds: since - p.start), p.data.count)
-                let rest = p.data.subdata(in: skip..<p.data.count)
-                if !rest.isEmpty {
-                    backlog.append(AudioPiece(start: p.start + PCM.nanoseconds(bytes: skip), data: rest))
-                }
-            }
-        }
+        for p in pieces { if let piece = p.sliced(from: since) { backlog.append(piece) } }
         lock.unlock()
         return (backlog, stream, id)
     }

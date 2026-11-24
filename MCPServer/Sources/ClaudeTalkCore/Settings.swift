@@ -87,6 +87,13 @@ public struct DirectSettings: Codable, Equatable, Sendable {
     public var prerollMaxSeconds: Double = 8
     /// speak が無い時に listen の前の音を足す長さ (頭切れの保険)。
     public var prerollLeadSeconds: Double = 0.3
+    /// プリロールの始点は、直前の読み上げの終わり (実際に鳴り終わった時) からこの ms 後より前にしない
+    /// (スピーカーの残り音を拾わないため)。0 で無効。
+    public var speakTailGuardMs: Int = 150
+    /// 読み上げの終わりからこの ms 以内に始まった発話は、直前の読み上げ文と似ていたら捨てて聞き直す。0 で無効。
+    public var echoWindowMs: Int = 2000
+    /// 「似ている」とみなす一致度 (0〜1。正規化後の近似部分一致)。0 で無効。
+    public var echoSimilarity: Double = 0.75
     /// 話し始めてからの上限 (超えたら区切って返す)。listen の timeout は「話し始めを待つ長さ」。
     public var maxSpeechSeconds: Double = 120
     /// speech serve の起動待ち (Haas の初回読み込みは 14 秒前後のことがある)。
@@ -130,6 +137,7 @@ public struct DirectSettings: Codable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
         case port, speechBin, asrModel, vadModel, language, silenceMs, prefixPaddingMs, vadThreshold
         case micIdleCloseSeconds, prerollMaxSeconds, prerollLeadSeconds, maxSpeechSeconds
+        case speakTailGuardMs, echoWindowMs, echoSimilarity
         case serverStartTimeoutSeconds, silentMicCheckSeconds, micNoDataTimeoutSeconds, micLockWaitSeconds
         case voice, rate
         case tts, ttsPort, ttsModel, ttsVoiceName, ttsVoiceFile, ttsInstructions, ttsSpeed, ttsSeed
@@ -151,6 +159,9 @@ public struct DirectSettings: Codable, Equatable, Sendable {
         prerollMaxSeconds = try c.decodeIfPresent(Double.self, forKey: .prerollMaxSeconds) ?? d.prerollMaxSeconds
         prerollLeadSeconds = try c.decodeIfPresent(Double.self, forKey: .prerollLeadSeconds) ?? d.prerollLeadSeconds
         maxSpeechSeconds = try c.decodeIfPresent(Double.self, forKey: .maxSpeechSeconds) ?? d.maxSpeechSeconds
+        speakTailGuardMs = try c.decodeIfPresent(Int.self, forKey: .speakTailGuardMs) ?? d.speakTailGuardMs
+        echoWindowMs = try c.decodeIfPresent(Int.self, forKey: .echoWindowMs) ?? d.echoWindowMs
+        echoSimilarity = try c.decodeIfPresent(Double.self, forKey: .echoSimilarity) ?? d.echoSimilarity
         serverStartTimeoutSeconds = try c.decodeIfPresent(Double.self, forKey: .serverStartTimeoutSeconds) ?? d.serverStartTimeoutSeconds
         silentMicCheckSeconds = try c.decodeIfPresent(Double.self, forKey: .silentMicCheckSeconds) ?? d.silentMicCheckSeconds
         micNoDataTimeoutSeconds = try c.decodeIfPresent(Double.self, forKey: .micNoDataTimeoutSeconds) ?? d.micNoDataTimeoutSeconds

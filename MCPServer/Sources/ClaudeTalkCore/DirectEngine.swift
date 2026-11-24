@@ -20,6 +20,8 @@ public actor DirectEngine {
     private let micLock = FileLock(url: TalkPaths.micLock)
     private var micVerified = false
     private var speakEndAt: UInt64?
+    /// 直前の読み上げ (文と鳴り終わった時刻)。listen の始点の下限と、似た書き起こしを捨てる判定に使う。listen では消さない。
+    private var lastSpeak: (text: String, endAt: UInt64)?
     private var idleToken = 0
     private var busy = 0
     private var speaker: Speaker?
@@ -83,6 +85,7 @@ public actor DirectEngine {
             try? startInput()
         }
         speakEndAt = nil
+        input?.trigger("speak_start")
         var finished = false
         var used = kind
         if kind == .irodori {
@@ -93,6 +96,7 @@ public actor DirectEngine {
             } catch let f as IrodoriFailure where f.audioStarted {
                 // 途中まで鳴った後の失敗は、avspeech で読み直さない (同じ文を 2 度読まない)。
                 speakEndAt = PCM.now()
+                lastSpeak = (text, speakEndAt!)
                 input?.trigger("speak_done")
                 log.event("speak.done", mode: .direct, fields: ["ms": sw.ms, "finished": false, "tts": "irodori",
                                                                 "error": f.localizedDescription])
@@ -108,6 +112,7 @@ public actor DirectEngine {
                                      locale: locale, sw: sw)
         }
         speakEndAt = PCM.now()
+        lastSpeak = (text, speakEndAt!)
         input?.trigger("speak_done")
         log.event("speak.done", mode: .direct, fields: ["ms": sw.ms, "finished": finished, "tts": used.rawValue])
         try Task.checkCancellation()
@@ -193,8 +198,21 @@ public actor DirectEngine {
         var since = listenAt > UInt64(settings.prerollLeadSeconds * 1e9) ? listenAt - UInt64(settings.prerollLeadSeconds * 1e9) : 0
         if let end = speakEndAt, end <= listenAt, listenAt - end <= maxBack { since = min(since, end) }
         speakEndAt = nil
+        // 読み上げの終わり + speakTailGuardMs より前の音は使わない (読み上げの最後を拾わない)。
+        // listen がそれより早く来た時は、始点が少し先になる (届いた音もその時刻までは送らない)。
+        var guardedMs = 0
+        if let last = lastSpeak, settings.speakTailGuardMs > 0 {
+            let floor = last.endAt &+ UInt64(settings.speakTailGuardMs) * 1_000_000
+            if since < floor {
+                guardedMs = Int((floor - since) / 1_000_000)
+                since = floor
+            }
+        }
+        let nowMic = PCM.now()
         log.event("listen.mic_ready", mode: .direct, fields: [
-            "opened_now": openedNow, "input": input?.name ?? "", "preroll_ms": Int((PCM.now() - since) / 1_000_000)])
+            "opened_now": openedNow, "input": input?.name ?? "",
+            "preroll_ms": nowMic >= since ? Int((nowMic - since) / 1_000_000) : -Int((since - nowMic) / 1_000_000),
+            "tail_guard_ms": guardedMs])
 
         // 4) Realtime
         let lang = Self.isoLanguage(locale, fallback: settings.language)
@@ -206,7 +224,8 @@ public actor DirectEngine {
 
         let sub = ring.subscribe(since: since)
         defer { ring.unsubscribe(sub.id) }
-        let sessionStart = sub.backlog.first?.start ?? PCM.now()
+        let sessionStart = sub.backlog.first?.start ?? max(PCM.now(), since)
+        let echoRef = lastSpeak
 
         enum Signal: Sendable { case event(RealtimeEvent), tick, failure(String) }
         let (signals, sig) = AsyncStream<Signal>.makeStream()
@@ -215,7 +234,10 @@ public actor DirectEngine {
         let sender = Task {
             do {
                 for p in sub.backlog { try await rt.append(p.data) }
-                for await p in sub.stream { try await rt.append(p.data) }
+                for await p in sub.stream {
+                    guard let piece = p.sliced(from: since) else { continue }
+                    try await rt.append(piece.data)
+                }
             } catch {
                 sig.yield(.failure("\(error.localizedDescription)"))
             }
@@ -251,6 +273,8 @@ public actor DirectEngine {
         var committedForLimit: Date?
         var stoppedAt: Date?
         var speechEndDate: Date?
+        var itemStartMs: [String: Int] = [:]
+        var discardedEcho = 0
 
         func wallDate(uptime: UInt64) -> Date {
             let now = PCM.now()
@@ -276,12 +300,14 @@ public actor DirectEngine {
                     log.event("asr.max_speech", mode: .direct, fields: ["seconds": settings.maxSpeechSeconds])
                 } else if !tracker.heardSpeech, !tracker.speaking, now > waitDeadline {
                     log.event("asr.timeout", mode: .direct, fields: ["timeout": timeout,
-                                                                     "discarded_empty": tracker.discardedEmpty])
+                                                                     "discarded_empty": tracker.discardedEmpty,
+                                                                     "discarded_echo": discardedEcho])
                     return ""
                 }
             case .event(let ev):
                 switch ev {
-                case .speechStarted(_, let startMs):
+                case .speechStarted(let item, let startMs):
+                    itemStartMs[item] = startMs
                     if speechDeadline == nil { speechDeadline = Date().addingTimeInterval(settings.maxSpeechSeconds) }
                     log.event("asr.speech_started", mode: .direct, fields: ["audio_start_ms": startMs,
                                                                             "ms": sw.ms])
@@ -304,7 +330,19 @@ public actor DirectEngine {
                 default:
                     break
                 }
-                if case .finish(let text) = tracker.handle(ev) { return text }
+                var tracked = ev
+                if case .completed(let item, let transcript) = ev, let ref = echoRef,
+                   let v = echoVerdict(transcript: transcript, item: item, itemStartMs: itemStartMs,
+                                       sessionStart: sessionStart, speak: ref, settings: settings) {
+                    // 直前の読み上げを拾ったもの: 空として扱い、聞き続ける (聞き直す)。
+                    discardedEcho += 1
+                    tracked = .completed(item: item, transcript: "")
+                    speechDeadline = nil
+                    log.event("asr.discarded_echo", mode: .direct, fields: [
+                        "text": transcript, "score": v.verdict.score, "reason": v.verdict.reason,
+                        "after_speak_end_ms": v.afterSpeakEndMs, "count": discardedEcho])
+                }
+                if case .finish(let text) = tracker.handle(tracked) { return text }
                 if case .completed = ev, committedForLimit != nil, !tracker.speaking {
                     return tracker.partialText
                 }
@@ -312,6 +350,21 @@ public actor DirectEngine {
         }
         if Task.isCancelled { throw CancellationError() }
         throw TalkError.realtime("セッションが途中で終わりました")
+    }
+
+    /// 書き起こしが直前の読み上げを拾ったものなら判定を返す (捨てる)。発話の始まりが読み上げの終わりから
+    /// echoWindowMs を超えていれば、ユーザーが言い返したものとみなして捨てない。
+    private func echoVerdict(transcript: String, item: String, itemStartMs: [String: Int], sessionStart: UInt64,
+                             speak: (text: String, endAt: UInt64), settings: DirectSettings)
+        -> (verdict: EchoFilter.Verdict, afterSpeakEndMs: Int)? {
+        guard settings.echoWindowMs > 0, settings.echoSimilarity > 0 else { return nil }
+        let startMs = max(itemStartMs[item] ?? 0, 0)
+        let startAt = sessionStart &+ UInt64(startMs) * 1_000_000
+        let after = startAt >= speak.endAt ? Int((startAt - speak.endAt) / 1_000_000)
+                                           : -Int((speak.endAt - startAt) / 1_000_000)
+        guard after <= settings.echoWindowMs else { return nil }
+        let v = EchoFilter.judge(transcript: transcript, spoken: speak.text, threshold: settings.echoSimilarity)
+        return v.isEcho ? (v, after) : nil
     }
 
     /// 開けてから silentMicCheckSeconds の音が全部ほぼ 0 なら、許可が無い・入力が違うとみなす。

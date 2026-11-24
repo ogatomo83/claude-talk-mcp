@@ -148,3 +148,66 @@ final class TimingLogTests: XCTestCase {
         XCTAssertEqual(obj["mode"] as? String, "app")
     }
 }
+
+final class EchoFilterTests: XCTestCase {
+    let spoken = "今日はここまでにしておくぞ。"
+
+    func testTailOfSpeechIsEcho() {
+        XCTAssertTrue(EchoFilter.judge(transcript: "ぞ。", spoken: spoken, threshold: 0.75).isEcho)
+        XCTAssertTrue(EchoFilter.judge(transcript: "しておくぞ", spoken: spoken, threshold: 0.75).isEcho)
+        // 実測: 残り音が「ぞう」「ておくぞー」と書き起こされた
+        XCTAssertTrue(EchoFilter.judge(transcript: "ぞう", spoken: spoken, threshold: 0.75).isEcho)
+        XCTAssertTrue(EchoFilter.judge(transcript: "ておくぞー", spoken: spoken, threshold: 0.75).isEcho)
+        XCTAssertTrue(EchoFilter.judge(transcript: "行くぞ", spoken: spoken, threshold: 0.75).isEcho)
+        XCTAssertTrue(EchoFilter.judge(transcript: "きれいにしておくぞ", spoken: spoken, threshold: 0.75).isEcho)
+        // 書き起こしの揺れ (カタカナ・記号・1 文字違い)
+        XCTAssertTrue(EchoFilter.judge(transcript: "ここまでにしとくぞ!", spoken: spoken, threshold: 0.75).isEcho)
+        XCTAssertTrue(EchoFilter.judge(transcript: "Dockerを使います", spoken: "では、ドッカーをつかいます。dockerを使います。",
+                                       threshold: 0.75).isEcho)
+    }
+
+    func testUserReplyIsNotEcho() {
+        XCTAssertFalse(EchoFilter.judge(transcript: "はい、お願いします", spoken: spoken, threshold: 0.75).isEcho)
+        XCTAssertFalse(EchoFilter.judge(transcript: "うん", spoken: spoken, threshold: 0.75).isEcho)
+        XCTAssertFalse(EchoFilter.judge(transcript: "そう", spoken: spoken, threshold: 0.75).isEcho)
+        XCTAssertFalse(EchoFilter.judge(transcript: "え", spoken: spoken, threshold: 0.75).isEcho)
+        // 長い返事の一部に同じ語があっても捨てない
+        XCTAssertFalse(EchoFilter.judge(transcript: "ここまでにするなら明日は何から始める?", spoken: spoken,
+                                        threshold: 0.75).isEcho)
+        // 0 で無効
+        XCTAssertFalse(EchoFilter.judge(transcript: "ぞ", spoken: spoken, threshold: 0).isEcho)
+    }
+
+    func testRomaji() {
+        XCTAssertEqual(String(EchoFilter.romaji("しておくぞ。")), "shiteokuzo")
+        XCTAssertEqual(String(EchoFilter.romaji("Docker を")), "dockerwo")
+    }
+
+    func testNormalize() {
+        XCTAssertEqual(String(EchoFilter.normalize("ドッカー、Ｄｏｃｋｅｒ！ 1")), "どっかーdocker1")
+    }
+}
+
+final class TailGuardTests: XCTestCase {
+    func testSettingsDefaultsAndOverride() throws {
+        let d = DirectSettings()
+        XCTAssertEqual(d.speakTailGuardMs, 150)
+        XCTAssertEqual(d.echoWindowMs, 2000)
+        XCTAssertEqual(d.echoSimilarity, 0.75)
+        let s = try JSONDecoder().decode(DirectSettings.self,
+                                         from: Data(#"{"speakTailGuardMs": 300, "echoSimilarity": 0}"#.utf8))
+        XCTAssertEqual(s.speakTailGuardMs, 300)
+        XCTAssertEqual(s.echoSimilarity, 0)
+        XCTAssertEqual(s.echoWindowMs, 2000)
+    }
+
+    func testPieceSlicedFromFutureStart() {
+        let d = Data(count: PCM.bytesPerSecond / 10) // 0.1 s
+        let p = AudioPiece(start: 1_000_000_000, data: d)
+        XCTAssertNil(p.sliced(from: 1_100_000_000))
+        XCTAssertEqual(p.sliced(from: 0)?.data.count, d.count)
+        let half = p.sliced(from: 1_050_000_000)
+        XCTAssertEqual(half?.start, 1_050_000_000)
+        XCTAssertEqual(half?.data.count, d.count / 2)
+    }
+}
