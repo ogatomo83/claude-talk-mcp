@@ -2,12 +2,15 @@
 //  IrodoriSpeaker.swift
 //  ClaudeTalkCore
 //
-//  direct モードの読み上げ (Irodori-TTS)。speech serve の /v1/audio/speech に response_format=pcm で頼み、
+//  direct モードの読み上げ (speech.cpp の Qwen3-TTS / Irodori-TTS。名前は最初の Irodori のまま)。
+//  speech serve の /v1/audio/speech に response_format=pcm で頼み、
 //  届いた PCM を届いたそばから AVAudioEngine の PlayerNode で鳴らす (最初の音を早くする)。
 //  speak の戻りは「最後の音が鳴り終わった時」: 最後のバッファの .dataPlayedBack (出力まで出た) を待つ。
 //
 //  AVAudioEngine にしたのは、将来エコー除去 (inputNode の voice processing) を同じ engine で入れられるようにするため。
 //  今はマイク (Audio.swift の MicInput) と別の engine。voice processing を入れる時は 1 つの engine にまとめる。
+//
+//  速さ (ttsSpeed): Irodori は serve の speed、Qwen は PlayerNode と mainMixer の間の AVAudioUnitTimePitch (高さはそのまま)。
 //
 //  テスト用の口 (音を鳴らさない確認):
 //    CLAUDE_TALK_TTS_OUTPUT_FILE=<path.wav> … スピーカーを使わず、engine の offline 描画で WAV に書く
@@ -21,7 +24,7 @@ import Foundation
 public struct IrodoriFailure: LocalizedError {
     public let message: String
     public let audioStarted: Bool
-    public var errorDescription: String? { "読み上げ (Irodori): \(message)" }
+    public var errorDescription: String? { "読み上げ (speech.cpp): \(message)" }
 }
 
 /// 1 回の読み上げの時間 (ms、speak を受けてから)。
@@ -60,10 +63,11 @@ public final class IrodoriSpeaker: @unchecked Sendable {
         req.httpBody = try JSONSerialization.data(withJSONObject: Self.requestBody(text: text, settings: settings))
 
         stop()
-        // 再生の engine は HTTP の応答を待つ間に作る (Irodori は 48 kHz。違えば header で作り直す)。
-        let expectedRate = 48_000.0
+        // 再生の engine は HTTP の応答を待つ間に作る (Irodori 48 kHz / Qwen 24 kHz。違えば header で作り直す)。
+        let expectedRate = settings.ttsProfile.sampleRate
+        let speed = settings.ttsLocalSpeed
         let early = Task.detached { () -> StreamPlayer? in
-            try? StreamPlayer(sampleRate: expectedRate, outputFile: outputFile, volume: volume, probe: probe)
+            try? StreamPlayer(sampleRate: expectedRate, outputFile: outputFile, volume: volume, speed: speed, probe: probe)
         }
         let stream = PCMHTTPStream(request: req)
         timing.requestMs = sw.ms
@@ -93,7 +97,7 @@ public final class IrodoriSpeaker: @unchecked Sendable {
                             p = e
                         } else {
                             await early.value?.shutdown()
-                            p = try StreamPlayer(sampleRate: rate, outputFile: outputFile, volume: volume, probe: probe)
+                            p = try StreamPlayer(sampleRate: rate, outputFile: outputFile, volume: volume, speed: speed, probe: probe)
                         }
                         player = p
                         timing.playerReadyMs = sw.ms
@@ -108,7 +112,7 @@ public final class IrodoriSpeaker: @unchecked Sendable {
                             onTiming?("first_audio", timing)
                         }
                         try p.schedule(int16: data)
-                        timing.audioSeconds += Double(data.count / 2) / p.format.sampleRate
+                        timing.audioSeconds += Double(data.count / 2) / p.format.sampleRate / speed
                     }
                 }
             } catch {
@@ -155,7 +159,8 @@ public final class IrodoriSpeaker: @unchecked Sendable {
     static func requestBody(text: String, settings: DirectSettings) -> [String: Any] {
         var body: [String: Any] = ["input": text, "voice": settings.ttsVoiceName, "response_format": "pcm"]
         if !settings.ttsInstructions.isEmpty { body["instructions"] = settings.ttsInstructions }
-        if let speed = settings.ttsSpeed { body["speed"] = speed }
+        // Qwen3-TTS 0.6B は speed を受け付けない (HTTP 400 unsupported_parameter)。その時は手元で伸縮する。
+        if settings.ttsServerSpeed, let speed = settings.ttsSpeed { body["speed"] = speed }
         if let seed = settings.ttsSeed { body["seed"] = seed }
         return body
     }
@@ -254,10 +259,13 @@ final class PCMHTTPStream: NSObject, URLSessionDataDelegate, @unchecked Sendable
 // MARK: - 再生 (AVAudioEngine + PlayerNode)
 
 /// 届いた PCM を順に鳴らす。finishAndWait() は最後のバッファが出力まで出た (.dataPlayedBack) 時に返る。
+/// speed が 1 以外なら PlayerNode → AVAudioUnitTimePitch → mainMixer (高さを変えずに速さだけ変える)。
 final class StreamPlayer: @unchecked Sendable {
     let engine = AVAudioEngine()
     let node = AVAudioPlayerNode()
     let format: AVAudioFormat
+    let speed: Double
+    private let timePitch: AVAudioUnitTimePitch?
     private let file: AVAudioFile?
     private let renderBuffer: AVAudioPCMBuffer?
     private let lock = NSLock()
@@ -267,17 +275,32 @@ final class StreamPlayer: @unchecked Sendable {
     private var waiter: CheckedContinuation<Bool, Never>?
     private var result: Bool?
     private var tapped = false
+    /// offline 描画 (WAV) で、積んだ入力のフレーム数 / 描画した出力のフレーム数。
+    private var fileInFrames = 0
+    private var fileOutFrames = 0
 
-    init(sampleRate: Double, outputFile: URL?, volume: Float?,
+    init(sampleRate: Double, outputFile: URL?, volume: Float?, speed: Double = 1,
          probe: (@Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void)?) throws {
         guard let f = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1) else {
             throw TTSError.stream("再生の形式を作れません (\(sampleRate) Hz)")
         }
         format = f
+        self.speed = speed
         engine.attach(node)
+        if abs(speed - 1) > 0.001 {
+            let tp = AVAudioUnitTimePitch()
+            tp.rate = Float(speed)
+            engine.attach(tp)
+            timePitch = tp
+        } else {
+            timePitch = nil
+        }
+        // 最後の段 (mainMixer の手前)。測定の probe はここに付ける (聞こえる音そのもの)。
+        let last: AVAudioNode = timePitch ?? node
+        tapNode = last
         if let outputFile {
             try engine.enableManualRenderingMode(.offline, format: f, maximumFrameCount: 4096)
-            engine.connect(node, to: engine.mainMixerNode, format: f)
+            Self.wire(engine, node, timePitch, f)
             let fileSettings: [String: Any] = [
                 AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: sampleRate, AVNumberOfChannelsKey: 1,
                 AVLinearPCMBitDepthKey: 16, AVLinearPCMIsFloatKey: false, AVLinearPCMIsBigEndianKey: false,
@@ -288,16 +311,51 @@ final class StreamPlayer: @unchecked Sendable {
         } else {
             file = nil
             renderBuffer = nil
-            engine.connect(node, to: engine.mainMixerNode, format: f)
+            Self.wire(engine, node, timePitch, f)
             if let volume { engine.mainMixerNode.outputVolume = max(0, min(volume, 1)) }
             if let probe {
-                node.installTap(onBus: 0, bufferSize: 1024, format: f) { buf, when in probe(buf, when) }
+                last.installTap(onBus: 0, bufferSize: 1024, format: f) { buf, when in probe(buf, when) }
                 tapped = true
             }
         }
         engine.prepare()
         try engine.start()
         node.play()
+    }
+
+    private let tapNode: AVAudioNode
+
+    private static func wire(_ engine: AVAudioEngine, _ node: AVAudioPlayerNode, _ tp: AVAudioUnitTimePitch?, _ f: AVAudioFormat) {
+        if let tp {
+            engine.connect(node, to: tp, format: f)
+            engine.connect(tp, to: engine.mainMixerNode, format: f)
+        } else {
+            engine.connect(node, to: engine.mainMixerNode, format: f)
+        }
+    }
+
+    /// offline 描画で、入力が足りている所まで出力を描画する。flush なら残りと伸縮の遅れの分まで全部。
+    private func renderFile(flush: Bool) throws {
+        guard let file, let rb = renderBuffer else { return }
+        let target: Int
+        if flush {
+            // 残りを描き切る。PlayerNode は offline でも最初の音を少し (実測 0.1 s) 遅れて出し、伸縮はさらに latency 分遅れるので、
+            // その分 (+ 余裕) を足す。足した分は無音。
+            let tail = Int(((timePitch?.latency ?? 0) + 0.3) * format.sampleRate)
+            target = Int((Double(fileInFrames) / speed).rounded(.up)) + tail
+        } else if timePitch == nil {
+            target = fileInFrames
+        } else {
+            // 伸縮は先の入力を少し読むので、4096 フレームの余裕を残して描く (途中で入力が尽きて隙間が入らないように)
+            target = max(0, Int(Double(fileInFrames - 4096) / speed))
+        }
+        while fileOutFrames < target {
+            let n = AVAudioFrameCount(min(target - fileOutFrames, Int(rb.frameCapacity)))
+            let st = try engine.renderOffline(n, to: rb)
+            guard st == .success else { throw TTSError.stream("offline 描画に失敗 (\(st.rawValue))") }
+            try file.write(from: rb)
+            fileOutFrames += Int(n)
+        }
     }
 
     /// 16-bit LE mono を 1 つ足す。
@@ -310,16 +368,10 @@ final class StreamPlayer: @unchecked Sendable {
             let s = raw.bindMemory(to: Int16.self)
             for i in 0..<Int(frames) { ch[0][i] = Float(Int16(littleEndian: s[i])) / 32768 }
         }
-        if let file, let rb = renderBuffer {
+        if file != nil {
             node.scheduleBuffer(buf, completionHandler: nil)
-            var remaining = frames
-            while remaining > 0 {
-                let n = min(remaining, rb.frameCapacity)
-                let st = try engine.renderOffline(n, to: rb)
-                guard st == .success else { throw TTSError.stream("offline 描画に失敗 (\(st.rawValue))") }
-                try file.write(from: rb)
-                remaining -= n
-            }
+            fileInFrames += Int(frames)
+            try renderFile(flush: false)
             return
         }
         lock.lock()
@@ -357,7 +409,24 @@ final class StreamPlayer: @unchecked Sendable {
 
     /// もう足さない。鳴り終わるまで待つ。最後まで鳴ったら true、stop() されたら false。
     func finishAndWait() async -> Bool {
-        if file != nil { return true }
+        if file != nil {
+            do { try renderFile(flush: true) } catch { return false }
+            return true
+        }
+        let played = await waitPlayedBack()
+        // 伸縮を掛けた時は、TimePitch の中に残った分 (latency) が鳴り終わるまで待つ。
+        if played, let tp = timePitch, tp.latency > 0 {
+            try? await Task.sleep(nanoseconds: UInt64(tp.latency * 1e9))
+        }
+        return played && !isStopped
+    }
+
+    private var isStopped: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return stopped
+    }
+
+    private func waitPlayedBack() async -> Bool {
         return await withCheckedContinuation { (c: CheckedContinuation<Bool, Never>) in
             lock.lock()
             inputDone = true
@@ -395,7 +464,7 @@ final class StreamPlayer: @unchecked Sendable {
     }
 
     func shutdown() {
-        if tapped { node.removeTap(onBus: 0); tapped = false }
+        if tapped { tapNode.removeTap(onBus: 0); tapped = false }
         node.stop()
         engine.stop()
     }

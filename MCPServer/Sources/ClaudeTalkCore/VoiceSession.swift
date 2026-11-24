@@ -5,7 +5,7 @@
 //  claude-talk-voice の本体 (案 2 の段 a、ヘッドホン前提)。
 //    マイク → speech serve の Realtime (Silero VAD + Haas、常につないだまま)
 //      → 話し終わったら書き起こしを claude (stream-json) に user メッセージで送る
-//      → text_delta を文に区切って Irodori で次々に読み上げる
+//      → text_delta を文に区切って speech serve (既定 Qwen3-TTS 0.6B serena) で次々に読み上げる
 //      → 読み上げ中・考え中にユーザーが bargeInMs 以上話したら、読み上げを止めて interrupt を送り、聞く
 //  合図 (「どうぞ」等) は付けない。
 //
@@ -98,7 +98,7 @@ public actor VoiceSession {
         }
         ev("mic.open", ["input": input.name])
 
-        // 2) speech serve (書き起こし) と Irodori (読み上げ) を並行で起こす
+        // 2) speech serve (書き起こし) と読み上げの serve (既定 Qwen 8768) を並行で起こす
         let direct = self.direct
         async let asrReady: Bool = SpeechServer(settings: direct).ensureRunning()
         async let ttsReady: Bool = TTSServer(settings: direct).ensureRunning(timeout: direct.serverStartTimeoutSeconds)

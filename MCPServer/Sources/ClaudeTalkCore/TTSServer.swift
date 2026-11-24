@@ -2,7 +2,8 @@
 //  TTSServer.swift
 //  ClaudeTalkCore
 //
-//  読み上げ用の speech serve (Irodori-TTS + 声ファイル、127.0.0.1 だけ) を、要る時に起動して /health で確かめる。
+//  読み上げ用の speech serve (Qwen3-TTS 0.6B の 8768 / Irodori-TTS + 声ファイルの 8767、127.0.0.1 だけ) を、
+//  要る時に起動して /health で確かめる。
 //  listen の serve (SpeechServer、Haas + Silero、8766) とは別のプロセスにした:
 //    - 8766 に足すと、動いている 8766 を止めて起動し直す必要があり、listen の起動も 0.4 秒 → 2 秒に延びる
 //    - メモリは別にしても +0.1 GB ほど (同居 2.2 GB / 別々 1.3 + 1.0 GB、T-0031 の実測)
@@ -66,9 +67,9 @@ public struct TTSServer: Sendable {
         case .wrong(let m): throw TTSError.server(m)
         case .down: break
         }
-        let lock = FileLock(url: TalkPaths.ttsServeLock)
+        let lock = FileLock(url: lockURL)
         guard await lock.lock(timeout: timeout) else {
-            throw TTSError.server("読み上げの serve の起動を待ちきれません (\(TalkPaths.ttsServeLock.path))")
+            throw TTSError.server("読み上げの serve の起動を待ちきれません (\(lockURL.path))")
         }
         defer { lock.unlock() }
         switch await health() {
@@ -76,11 +77,10 @@ public struct TTSServer: Sendable {
         case .wrong(let m): throw TTSError.server(m)
         case .down: break
         }
-        guard FileManager.default.fileExists(atPath: settings.ttsVoiceFilePath) else {
-            throw TTSError.server("声ファイルがありません: \(settings.ttsVoiceFilePath)")
+        if let file = settings.ttsVoiceFilePath, !FileManager.default.fileExists(atPath: file) {
+            throw TTSError.server("声ファイルがありません: \(file)")
         }
-        let pid = try DetachedProcess.spawn(arguments: arguments, logURL: TalkPaths.ttsServeLog,
-                                            pidURL: TalkPaths.ttsServePid)
+        let pid = try DetachedProcess.spawn(arguments: arguments, logURL: logURL, pidURL: pidURL)
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             try? await Task.sleep(nanoseconds: 100_000_000)
@@ -90,19 +90,24 @@ public struct TTSServer: Sendable {
             case .down:
                 var status: Int32 = 0
                 if waitpid(pid, &status, WNOHANG) == pid {
-                    throw TTSError.server("読み上げの speech serve が終了しました。\(TalkPaths.ttsServeLog.path) を見てください")
+                    throw TTSError.server("読み上げの speech serve が終了しました。\(logURL.path) を見てください")
                 }
             }
             if Task.isCancelled { throw CancellationError() }
         }
-        throw TTSError.server("読み上げの speech serve が \(Int(timeout)) 秒で立ちません (\(TalkPaths.ttsServeLog.path))")
+        throw TTSError.server("読み上げの speech serve が \(Int(timeout)) 秒で立ちません (\(logURL.path))")
     }
 
-    /// 起動コマンド (127.0.0.1 だけで待ち受ける)。
+    public var logURL: URL { TalkPaths.ttsServeFile(settings.ttsServeEngine, "log") }
+    public var lockURL: URL { TalkPaths.ttsServeFile(settings.ttsServeEngine, "lock") }
+    public var pidURL: URL { TalkPaths.ttsServeFile(settings.ttsServeEngine, "pid") }
+
+    /// 起動コマンド (127.0.0.1 だけで待ち受ける)。声ファイルがある時だけ --add-voice。
     public var arguments: [String] {
-        [settings.speechBinPath, "serve", settings.ttsModel,
-         "--host", "127.0.0.1", "--port", String(settings.ttsPort), "--language", settings.language,
-         "--add-voice", "\(settings.ttsVoiceName)=\(settings.ttsVoiceFilePath)"]
+        var a = [settings.speechBinPath, "serve", settings.ttsModel,
+                 "--host", "127.0.0.1", "--port", String(settings.ttsPort), "--language", settings.language]
+        if let file = settings.ttsVoiceFilePath { a += ["--add-voice", "\(settings.ttsVoiceName)=\(file)"] }
+        return a
     }
 }
 

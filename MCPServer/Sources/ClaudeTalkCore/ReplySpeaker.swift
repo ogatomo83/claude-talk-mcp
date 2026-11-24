@@ -2,7 +2,7 @@
 //  ReplySpeaker.swift
 //  ClaudeTalkCore
 //
-//  1 つの返事を文ごとに Irodori で読み上げる。文が届いたら順に /v1/audio/speech に頼み、届いた PCM を
+//  1 つの返事を文ごとに speech serve (既定 Qwen3-TTS 0.6B serena / Irodori) で読み上げる。文が届いたら順に /v1/audio/speech に頼み、届いた PCM を
 //  1 つの PlayerNode に続けて積む (前の文が鳴っている間に次の文を作る)。stop() ですぐ止める (割り込み)。
 //
 //  テスト用の口: CLAUDE_TALK_TTS_VOLUME=0 (音量 0 で実時間再生)、CLAUDE_TALK_VOICE_TTS_DUMP_DIR=<dir>
@@ -194,7 +194,8 @@ public final class ReplySpeaker: @unchecked Sendable {
                     switch ev {
                     case .header(let rate):
                         if player == nil {
-                            let p = try StreamPlayer(sampleRate: rate, outputFile: nil, volume: volume, probe: nil)
+                            let p = try StreamPlayer(sampleRate: rate, outputFile: nil, volume: volume,
+                                                     speed: settings.ttsLocalSpeed, probe: nil)
                             let ok: Bool = locked {
                                 if stopped { return false }
                                 player = p

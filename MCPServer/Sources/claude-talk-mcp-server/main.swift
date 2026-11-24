@@ -26,7 +26,7 @@ let server = Server(
 
 let speakTool = Tool(
     name: "speak",
-    description: "与えられたテキストを読み上げる (direct モードは既定で Irodori-TTS、app モードは macOS の音声)。音が鳴り終わるまで待機する。",
+    description: "与えられたテキストを読み上げる (direct モードは既定で Qwen3-TTS 0.6B の serena、app モードは macOS の音声)。音が鳴り終わるまで待機する。",
     inputSchema: .object([
         "type": .string("object"),
         "properties": .object([

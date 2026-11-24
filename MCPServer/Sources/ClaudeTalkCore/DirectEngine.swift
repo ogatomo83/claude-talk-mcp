@@ -38,11 +38,11 @@ public actor DirectEngine {
     // MARK: - 起動時
 
     /// direct モードで起動した時に呼ぶ: speech serve を先に温めておく (初回 listen の待ちを減らす)。
-    /// 読み上げが irodori なら、その serve も並行して起こす。
+    /// 読み上げが speech serve (qwen / irodori) なら、その serve も並行して起こす。
     public func prewarm() async {
         let (settings, _) = DirectSettings.load()
         let log = self.log
-        if settings.ttsEngine == .irodori {
+        if settings.ttsEngine != .avspeech {
             Task.detached {
                 let sw = Stopwatch()
                 do {
@@ -65,8 +65,8 @@ public actor DirectEngine {
 
     // MARK: - speak
 
-    /// 読み上げ。settings.tts が irodori なら speech serve (Irodori) で、届いた音をそばから鳴らし、鳴り終わってから返る。
-    /// Irodori の serve が立たない・まだ何も鳴らないうちに失敗した時は avspeech に落とす (timing.jsonl に speak.fallback)。
+    /// 読み上げ。settings.tts が qwen (既定) / irodori なら speech serve で、届いた音をそばから鳴らし、鳴り終わってから返る。
+    /// serve が立たない・まだ何も鳴らないうちに失敗した時は avspeech に落とす (timing.jsonl に speak.fallback)。
     /// voice に AVSpeech の identifier (com.apple.…) を渡した時は、その回だけ avspeech。
     public func speak(text: String, voice: String?, rate: Double?, locale: String) async throws -> Bool {
         let (settings, warning) = DirectSettings.load()
@@ -88,9 +88,9 @@ public actor DirectEngine {
         input?.trigger("speak_start")
         var finished = false
         var used = kind
-        if kind == .irodori {
+        if kind != .avspeech {
             do {
-                finished = try await speakIrodori(text: text, settings: settings, sw: sw)
+                finished = try await speakServe(text: text, kind: kind, settings: settings, sw: sw)
             } catch is CancellationError {
                 throw CancellationError()
             } catch let f as IrodoriFailure where f.audioStarted {
@@ -98,11 +98,11 @@ public actor DirectEngine {
                 speakEndAt = PCM.now()
                 lastSpeak = (text, speakEndAt!)
                 input?.trigger("speak_done")
-                log.event("speak.done", mode: .direct, fields: ["ms": sw.ms, "finished": false, "tts": "irodori",
+                log.event("speak.done", mode: .direct, fields: ["ms": sw.ms, "finished": false, "tts": kind.rawValue,
                                                                 "error": f.localizedDescription])
                 throw f
             } catch {
-                log.event("speak.fallback", mode: .direct, fields: ["ms": sw.ms, "from": "irodori", "to": "avspeech",
+                log.event("speak.fallback", mode: .direct, fields: ["ms": sw.ms, "from": kind.rawValue, "to": "avspeech",
                                                                     "error": error.localizedDescription])
                 used = .avspeech
             }
@@ -127,7 +127,7 @@ public actor DirectEngine {
         }
     }
 
-    private func speakIrodori(text: String, settings: DirectSettings, sw: Stopwatch) async throws -> Bool {
+    private func speakServe(text: String, kind: TTSEngineKind, settings: DirectSettings, sw: Stopwatch) async throws -> Bool {
         let swServer = Stopwatch()
         let started = try await TTSServer(settings: settings).ensureRunning(timeout: settings.ttsStartTimeoutSeconds)
         log.event("speak.tts_ready", mode: .direct, fields: ["ms": swServer.ms, "started": started])
@@ -140,7 +140,7 @@ public actor DirectEngine {
             switch stage {
             case "first_audio":
                 log.event("speak.audio_start", mode: .direct, fields: [
-                    "ms": sw.ms, "tts": "irodori", "first_chunk_ms": t.firstChunkMs ?? -1,
+                    "ms": sw.ms, "tts": kind.rawValue, "speed": settings.ttsSpeedValue, "first_chunk_ms": t.firstChunkMs ?? -1,
                     "first_voiced_ms": t.firstVoicedMs ?? -1, "header_ms": t.headerMs ?? -1, "request_ms": t.requestMs ?? -1,
                     "player_ready_ms": t.playerReadyMs ?? -1])
             default:

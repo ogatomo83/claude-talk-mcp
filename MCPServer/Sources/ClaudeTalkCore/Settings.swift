@@ -31,10 +31,15 @@ public enum TalkPaths {
     public static var logsDir: URL { home.appendingPathComponent("logs", isDirectory: true) }
     /// 1 往復の各段の時間 (JSON Lines)。
     public static var timingLog: URL { logsDir.appendingPathComponent("timing.jsonl") }
-    /// 読み上げ (Irodori) の speech serve。listen の serve (8766) とは別のプロセス。
+    /// 読み上げの speech serve。listen の serve (8766) とは別のプロセス。
+    /// Irodori は今まで通り tts-serve.*、Qwen は tts-serve-qwen.* (2 つが同時に動いていても混ざらない)。
     public static var ttsServeLog: URL { directDir.appendingPathComponent("tts-serve.log") }
     public static var ttsServeLock: URL { directDir.appendingPathComponent("tts-serve.lock") }
     public static var ttsServePid: URL { directDir.appendingPathComponent("tts-serve.pid") }
+    public static func ttsServeFile(_ engine: TTSEngineKind, _ ext: String) -> URL {
+        engine == .irodori ? directDir.appendingPathComponent("tts-serve.\(ext)")
+                           : directDir.appendingPathComponent("tts-serve-\(engine.rawValue).\(ext)")
+    }
     /// 読み上げ前の読みの辞書 (1 行 1 語、`表記=読み`)。
     public static var readingsFile: URL { directDir.appendingPathComponent("readings.txt") }
     public static var voicesDir: URL { directDir.appendingPathComponent("voices", isDirectory: true) }
@@ -70,7 +75,7 @@ public enum TalkMode: String, Sendable {
 }
 
 /// direct モードの設定。`~/.claude-talk-mcp/direct/settings.json` の項目で上書きできる。
-public struct DirectSettings: Codable, Equatable, Sendable {
+public struct DirectSettings: Decodable, Equatable, Sendable {
     /// speech serve の待ち受けポート (127.0.0.1 固定)。app モードの 8765 とは別。
     public var port: Int = 8766
     public var speechBin: String = "~/.local/bin/speech"
@@ -110,20 +115,21 @@ public struct DirectSettings: Codable, Equatable, Sendable {
 
     // MARK: 読み上げ (speak)
 
-    /// 読み上げの仕組み: `irodori` (speech.cpp の Irodori-TTS、既定) / `avspeech` (macOS の AVSpeechSynthesizer)。
-    /// irodori の serve が立たない・声が無い時は avspeech に落ちて timing.jsonl に `speak.fallback` を書く。
-    public var tts: String = "irodori"
-    /// Irodori の speech serve の待ち受けポート (127.0.0.1 固定)。listen の port とは別のプロセス。
-    public var ttsPort: Int = 8767
-    public var ttsModel: String = "irodori-tts-mf:q5_k"
-    /// serve に `--add-voice 名前=ファイル` で足す声。
-    public var ttsVoiceName: String = "irodori-f-low"
-    public var ttsVoiceFile: String = "~/.claude-talk-mcp/direct/voices/irodori-f-low.voice.gguf"
-    /// 声と話し方の説明文 (Irodori の instructions)。空なら送らない。
-    public var ttsInstructions: String = "落ち着いた低めの女性の声で、ゆっくり穏やかに読み上げてください。"
-    /// Irodori の speed (0.25〜4)。未指定はモデルの既定 (1)。
+    /// 読み上げの仕組み: `qwen` (speech.cpp の Qwen3-TTS 0.6B、声 serena、既定) / `irodori` (speech.cpp の Irodori-TTS) /
+    /// `avspeech` (macOS の AVSpeechSynthesizer)。知らない値は qwen。
+    /// qwen / irodori の serve が立たない・まだ何も鳴らないうちに失敗した時は avspeech に落ちて timing.jsonl に `speak.fallback` を書く。
+    public var tts: String = "qwen"
+    /// 以下の ttsPort / ttsModel / ttsVoiceName / ttsVoiceFile / ttsInstructions は、settings.json に無ければ
+    /// 仕組み (tts) ごとの既定 (TTSProfile) になる。書けばその値で上書き。
+    private var ttsPortOverride: Int?
+    private var ttsModelOverride: String?
+    private var ttsVoiceNameOverride: String?
+    private var ttsVoiceFileOverride: String?
+    private var ttsInstructionsOverride: String?
+    /// 読み上げの速さ (1 = そのまま、0.5〜2)。未指定は 1。
+    /// irodori は serve の speed に渡す。qwen (0.6B は speed を受け付けない) は届いた音を手元で時間伸縮する (高さは変えない)。
     public var ttsSpeed: Double?
-    /// Irodori の seed。未指定は毎回サーバーが選ぶ (声は声ファイルで揃う)。
+    /// seed。未指定は毎回サーバーが選ぶ。
     public var ttsSeed: Int?
     /// TTS の serve の起動を speak が待つ上限。超えたらその回は avspeech (serve は裏で起動を続ける)。
     public var ttsStartTimeoutSeconds: Double = 20
@@ -131,6 +137,31 @@ public struct DirectSettings: Codable, Equatable, Sendable {
     public var ttsFirstAudioTimeoutSeconds: Double = 10
     /// 辞書に無い英字の扱い: `auto` (大文字だけの 2〜6 文字はアルファベット読み、ほかはそのまま) / `keep` / `spell`。
     public var ttsLatin: String = "auto"
+
+    /// speech serve の待ち受けポート (127.0.0.1 固定)。既定 qwen 8768 / irodori 8767。
+    public var ttsPort: Int {
+        get { ttsPortOverride ?? ttsProfile.port }
+        set { ttsPortOverride = newValue }
+    }
+    public var ttsModel: String {
+        get { ttsModelOverride ?? ttsProfile.model }
+        set { ttsModelOverride = newValue }
+    }
+    /// 声の名前。qwen は組み込みの話者 (serena など)、irodori は `--add-voice 名前=ファイル` で足す声。
+    public var ttsVoiceName: String {
+        get { ttsVoiceNameOverride ?? ttsProfile.voiceName }
+        set { ttsVoiceNameOverride = newValue }
+    }
+    /// serve に足す声ファイル。空なら足さない (qwen は組み込みの話者なので要らない)。
+    public var ttsVoiceFile: String {
+        get { ttsVoiceFileOverride ?? ttsProfile.voiceFile }
+        set { ttsVoiceFileOverride = newValue }
+    }
+    /// 声と話し方の説明文 (instructions)。空なら送らない (Qwen3-TTS 0.6B は受け付けないので既定は空)。
+    public var ttsInstructions: String {
+        get { ttsInstructionsOverride ?? ttsProfile.instructions }
+        set { ttsInstructionsOverride = newValue }
+    }
 
     public init() {}
 
@@ -169,11 +200,11 @@ public struct DirectSettings: Codable, Equatable, Sendable {
         voice = try c.decodeIfPresent(String.self, forKey: .voice)
         rate = try c.decodeIfPresent(Double.self, forKey: .rate)
         tts = try c.decodeIfPresent(String.self, forKey: .tts) ?? d.tts
-        ttsPort = try c.decodeIfPresent(Int.self, forKey: .ttsPort) ?? d.ttsPort
-        ttsModel = try c.decodeIfPresent(String.self, forKey: .ttsModel) ?? d.ttsModel
-        ttsVoiceName = try c.decodeIfPresent(String.self, forKey: .ttsVoiceName) ?? d.ttsVoiceName
-        ttsVoiceFile = try c.decodeIfPresent(String.self, forKey: .ttsVoiceFile) ?? d.ttsVoiceFile
-        ttsInstructions = try c.decodeIfPresent(String.self, forKey: .ttsInstructions) ?? d.ttsInstructions
+        ttsPortOverride = try c.decodeIfPresent(Int.self, forKey: .ttsPort)
+        ttsModelOverride = try c.decodeIfPresent(String.self, forKey: .ttsModel)
+        ttsVoiceNameOverride = try c.decodeIfPresent(String.self, forKey: .ttsVoiceName)
+        ttsVoiceFileOverride = try c.decodeIfPresent(String.self, forKey: .ttsVoiceFile)
+        ttsInstructionsOverride = try c.decodeIfPresent(String.self, forKey: .ttsInstructions)
         ttsSpeed = try c.decodeIfPresent(Double.self, forKey: .ttsSpeed)
         ttsSeed = try c.decodeIfPresent(Int.self, forKey: .ttsSeed)
         ttsStartTimeoutSeconds = try c.decodeIfPresent(Double.self, forKey: .ttsStartTimeoutSeconds) ?? d.ttsStartTimeoutSeconds
@@ -195,15 +226,56 @@ public struct DirectSettings: Codable, Equatable, Sendable {
     public var baseURL: URL { URL(string: "http://127.0.0.1:\(port)")! }
     public var realtimeURL: URL { URL(string: "ws://127.0.0.1:\(port)/v1/realtime")! }
 
-    /// 読み上げの仕組み (知らない値は irodori)。
-    public var ttsEngine: TTSEngineKind { TTSEngineKind(rawValue: tts.lowercased().trimmingCharacters(in: .whitespaces)) ?? .irodori }
+    /// 読み上げの仕組み (知らない値は qwen)。
+    public var ttsEngine: TTSEngineKind { TTSEngineKind(rawValue: tts.lowercased().trimmingCharacters(in: .whitespaces)) ?? .qwen }
+    /// speech serve で読む仕組み。avspeech の時も、serve を使う所 (claude-talk-voice・退避前の確認) は qwen。
+    public var ttsServeEngine: TTSEngineKind { ttsEngine == .irodori ? .irodori : .qwen }
+    public var ttsProfile: TTSProfile { TTSProfile.of(ttsServeEngine) }
     public var ttsBaseURL: URL { URL(string: "http://127.0.0.1:\(ttsPort)")! }
-    public var ttsVoiceFilePath: String { (ttsVoiceFile as NSString).expandingTildeInPath }
+    public var ttsVoiceFilePath: String? {
+        let f = ttsVoiceFile.trimmingCharacters(in: .whitespaces)
+        return f.isEmpty ? nil : (f as NSString).expandingTildeInPath
+    }
+    /// 速さ (0.5〜2 に丸める)。未指定は 1。
+    public var ttsSpeedValue: Double { min(max(ttsSpeed ?? 1, 0.5), 2) }
+    /// serve に speed を渡すか (Irodori だけ)。渡さない時は手元で時間伸縮する。
+    public var ttsServerSpeed: Bool { ttsProfile.serverSpeed }
+    /// 手元で掛ける再生の速さ (1 なら掛けない)。
+    public var ttsLocalSpeed: Double { ttsServerSpeed ? 1 : ttsSpeedValue }
 }
 
 public enum TTSEngineKind: String, Sendable {
+    case qwen
     case irodori
     case avspeech
+}
+
+/// speech serve で読む仕組みごとの既定。
+public struct TTSProfile: Equatable, Sendable {
+    public var port: Int
+    public var model: String
+    public var voiceName: String
+    public var voiceFile: String
+    public var instructions: String
+    /// serve が返す音の sample rate (再生の engine を先に作るための見込み。違えば応答の header で作り直す)。
+    public var sampleRate: Double
+    /// serve が speed を受け付けるか。
+    public var serverSpeed: Bool
+
+    public static func of(_ engine: TTSEngineKind) -> TTSProfile {
+        switch engine {
+        case .irodori:
+            return TTSProfile(port: 8767, model: "irodori-tts-mf:q5_k", voiceName: "irodori-f-low",
+                              voiceFile: "~/.claude-talk-mcp/direct/voices/irodori-f-low.voice.gguf",
+                              instructions: "落ち着いた低めの女性の声で、ゆっくり穏やかに読み上げてください。",
+                              sampleRate: 48_000, serverSpeed: true)
+        case .qwen, .avspeech:
+            // 聴き比べ (T-0031) の qwen06-serena と同じ: qwen3-tts-0.6b (Q8_0)、話者 serena、language ja、instructions なし。
+            // Irodori の 8767 と別のポートにした (Irodori の serve が動いたままでも立てられる)。
+            return TTSProfile(port: 8768, model: "qwen3-tts-0.6b", voiceName: "serena", voiceFile: "",
+                              instructions: "", sampleRate: 24_000, serverSpeed: false)
+        }
+    }
 }
 
 /// Haas の語彙 (keywords)。組み込みの既定 + `keywords.txt` の追加・上書き・削除。
