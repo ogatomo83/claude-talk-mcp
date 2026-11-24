@@ -22,6 +22,12 @@ let package = Package(
                 .product(name: "MCP", package: "swift-sdk")
             ]
         ),
+        // 常駐する声のプロセス (claude -p stream-json を動かす)。MCP サーバーとは別の実行ファイル。
+        .executableTarget(
+            name: "claude-talk-voice",
+            dependencies: ["ClaudeTalkCore"],
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
         .testTarget(
             name: "ClaudeTalkCoreTests",
             dependencies: ["ClaudeTalkCore"],

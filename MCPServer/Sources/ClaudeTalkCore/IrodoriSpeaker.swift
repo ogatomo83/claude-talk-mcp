@@ -327,12 +327,27 @@ final class StreamPlayer: @unchecked Sendable {
         pending += 1
         lock.unlock()
         node.scheduleBuffer(buf, completionCallbackType: .dataPlayedBack) { [weak self] _ in
-            self?.bufferPlayed()
+            self?.bufferPlayed(frames)
         }
     }
 
-    private func bufferPlayed() {
+    private var _playedFrames: Int = 0
+
+    /// 鳴り終わったバッファのフレーム数の合計 (どこまで聞こえたかの目安。バッファ単位)。
+    var playedFrames: Int {
+        lock.lock(); defer { lock.unlock() }
+        return _playedFrames
+    }
+
+    /// まだ鳴り終わっていないバッファの数 (0 なら今は何も鳴っていない)。
+    var pendingBuffers: Int {
+        lock.lock(); defer { lock.unlock() }
+        return pending
+    }
+
+    private func bufferPlayed(_ frames: AVAudioFrameCount) {
         lock.lock()
+        _playedFrames += Int(frames)
         pending -= 1
         let done = inputDone && pending == 0
         let ok = !stopped

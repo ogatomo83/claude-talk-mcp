@@ -109,14 +109,15 @@ public struct TurnTracker: Sendable {
     }
 }
 
-/// 1 回の listen の間だけ開く WebSocket。
+/// 1 回の listen の間だけ開く WebSocket (claude-talk-voice は常駐中ずっと開く)。
 public final class RealtimeSession: @unchecked Sendable {
     private let task: URLSessionWebSocketTask
     private let session: URLSession
 
-    public init(url: URL) {
+    /// requestTimeout: 受信が途切れてよい長さ。listen (1 回ごと) は 10 秒、常駐の claude-talk-voice は長くする。
+    public init(url: URL, requestTimeout: TimeInterval = 10) {
         let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 10
+        config.timeoutIntervalForRequest = requestTimeout
         session = URLSession(configuration: config)
         task = session.webSocketTask(with: url)
         task.maximumMessageSize = 16 * 1024 * 1024

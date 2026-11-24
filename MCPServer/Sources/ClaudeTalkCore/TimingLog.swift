@@ -5,6 +5,10 @@
 //  1 往復の各段の時刻を ~/.claude-talk-mcp/logs/timing.jsonl に 1 行 1 イベントで残す (app / direct 共通)。
 //  集計は tools/timing-report.py。
 //
+//  共通のキー: ev / mode / pid / turn / t (ISO8601) / at_ms (書いた時刻、epoch ms)。
+//  "ms" は各イベントの経過時間 (fields で渡した時だけ)。2026-11-25 より前の行は "ms" が書いた時刻 (epoch ms) で、
+//  at_ms はない (timing-report.py は at_ms が無ければ ms を時刻として読む)。
+//
 //  主なイベント (ev):
 //    speak.recv / speak.audio_start (direct) / speak.done
 //    listen.recv / listen.server_ready / listen.mic_ready / listen.ws_ready (direct)
@@ -42,6 +46,21 @@ public final class TimingLog: @unchecked Sendable {
         return turn
     }
 
+    /// 1 往復の番号を外から決める (claude-talk-voice は自分で数える)。
+    public func setTurn(_ t: Int) {
+        lock.lock(); turn = t; lock.unlock()
+    }
+
+    /// 1 行の中身を作る (pid・t・turn は event が足す)。書いた時刻は at_ms (epoch ms)。
+    /// fields の "ms" (経過時間) は上書きしない (以前は epoch ms で上書きしていた)。
+    public func encode(_ ev: String, modeName: String, fields: [String: Any], at date: Date) -> [String: Any] {
+        var obj: [String: Any] = fields
+        obj["ev"] = ev
+        obj["mode"] = modeName
+        obj["at_ms"] = Int64((date.timeIntervalSince1970 * 1000).rounded())
+        return obj
+    }
+
     public var currentTurn: Int {
         lock.lock(); defer { lock.unlock() }
         return turn
@@ -49,12 +68,14 @@ public final class TimingLog: @unchecked Sendable {
 
     /// 1 行書く。fields の値は JSON にできるもの (String / Int / Double / Bool)。
     public func event(_ ev: String, mode: TalkMode, fields: [String: Any] = [:], at date: Date = Date()) {
+        event(ev, modeName: mode.rawValue, fields: fields, at: date)
+    }
+
+    /// mode が TalkMode に無いもの (claude-talk-voice の "voice") 用。
+    public func event(_ ev: String, modeName: String, fields: [String: Any] = [:], at date: Date = Date()) {
         guard enabled else { return }
-        var obj: [String: Any] = fields
-        obj["ev"] = ev
-        obj["mode"] = mode.rawValue
+        var obj = encode(ev, modeName: modeName, fields: fields, at: date)
         obj["pid"] = Int(pid)
-        obj["ms"] = Int64((date.timeIntervalSince1970 * 1000).rounded())
         lock.lock(); defer { lock.unlock() }
         obj["t"] = iso.string(from: date)
         if obj["turn"] == nil { obj["turn"] = turn }

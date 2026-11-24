@@ -1,0 +1,110 @@
+//
+//  main.swift
+//  claude-talk-voice
+//
+//  常駐する声のプロセス (案 2 の段 a、ヘッドホン前提)。ターミナル (マイクの許可があるアプリ、iTerm2 など) で動かす:
+//
+//    claude-talk-voice [--cwd DIR] [--model NAME] [--resume SESSION_ID] [--tools LIST]
+//
+//  Ctrl-C で止める。claude-talk の MCP サーバー (/voice) とは別のプロセスで、MCP サーバーの動きは変えない。
+//  マイクは MCP の direct モードと同じロック (~/.claude-talk-mcp/direct/mic.lock) を取るので、同時には録らない。
+//
+//  設定: ~/.claude-talk-mcp/voice/settings.json (claude 側)、~/.claude-talk-mcp/direct/settings.json (録音・読み上げ)
+//  ログ: ~/.claude-talk-mcp/logs/timing.jsonl (mode=voice)、~/.claude-talk-mcp/voice/transcript.log
+//  テスト: CLAUDE_TALK_VOICE_TEST_SCRIPT (WAV を順に流す)、CLAUDE_TALK_TTS_VOLUME=0、CLAUDE_TALK_VOICE_TTS_DUMP_DIR
+//
+
+import ClaudeTalkCore
+import Foundation
+
+setvbuf(stdout, nil, _IOLBF, 0)
+
+func usage() -> Never {
+    print("""
+    usage: claude-talk-voice [--cwd DIR] [--model NAME] [--resume SESSION_ID] [--tools LIST] [--print-args]
+
+      --cwd DIR        claude を動かす作業ディレクトリ (既定 ~/.claude-talk-mcp/voice/work)
+      --model NAME     claude の --model (例 sonnet)
+      --resume ID      前の会話の続きから (終了時に表示される session id)
+      --tools LIST     使える組み込みツール (既定 Read,Glob,Grep。"" でツールなし)。確認が来たら allowTools だけ許す
+      --print-args     claude に渡す引数を表示して終わる
+    止め方: Ctrl-C
+    """)
+    exit(2)
+}
+
+var (voice, voiceWarning) = VoiceSettings.load()
+let (direct, directWarning) = DirectSettings.load()
+var resume: String?
+var printArgs = false
+var args = Array(CommandLine.arguments.dropFirst())
+while !args.isEmpty {
+    let a = args.removeFirst()
+    func value() -> String {
+        if args.isEmpty { usage() }
+        return args.removeFirst()
+    }
+    switch a {
+    case "--cwd": voice.cwd = value()
+    case "--model": voice.model = value()
+    case "--resume": resume = value()
+    case "--tools":
+        voice.tools = value()
+        voice.allowTools = voice.tools.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+    case "--print-args": printArgs = true
+    case "-h", "--help": usage()
+    default:
+        print("知らない引数: \(a)")
+        usage()
+    }
+}
+for w in [voiceWarning, directWarning].compactMap({ $0 }) { print("[警告] \(w)") }
+
+if printArgs {
+    print(([voice.claudeBin] + voice.claudeArguments(sessionId: "<new>", resume: resume)).joined(separator: " "))
+    print("cwd: \(voice.cwdPath)")
+    exit(0)
+}
+
+let input: AudioInput
+do {
+    if let s = try ScriptedWavInput.fromEnvironment() {
+        input = s
+    } else if let w = try WavFileInput.fromEnvironment() {
+        input = w
+    } else {
+        input = MicInput()
+    }
+} catch {
+    print("入力を用意できません: \(error.localizedDescription)")
+    exit(1)
+}
+
+let session = VoiceSession(voice: voice, direct: direct, resume: resume, input: input) { line in
+    print(line)
+}
+
+// Ctrl-C / SIGTERM で片付けてから終わる。
+signal(SIGINT, SIG_IGN)
+signal(SIGTERM, SIG_IGN)
+var signalSources: [DispatchSourceSignal] = []
+for sig in [SIGINT, SIGTERM] {
+    let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+    src.setEventHandler {
+        Task { await session.shutdown(reason: sig == SIGINT ? "sigint" : "sigterm") }
+    }
+    src.resume()
+    signalSources.append(src)
+}
+
+Task {
+    do {
+        try await session.run()
+        exit(0)
+    } catch {
+        print("起動できません: \(error.localizedDescription)")
+        await session.shutdown(reason: "error")
+        exit(1)
+    }
+}
+dispatchMain()
