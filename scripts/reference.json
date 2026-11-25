@@ -1,0 +1,68 @@
+{
+  "_comment": "check.py が比べる基準。check.py --print-state で作る。skill はリポの skills/voice/SKILL.md と比べる",
+  "effective_settings": {
+    "asrModel": "haas-ja-v1.0:f16",
+    "bargeIn": {
+      "bargeInMs": 300,
+      "echoFilter": true,
+      "enabled": true,
+      "voiceProcessing": true
+    },
+    "capsLock": {
+      "enabled": true,
+      "leadMs": 150,
+      "offMaxWaitSeconds": 300,
+      "pollMs": 50,
+      "source": "flags"
+    },
+    "language": "ja",
+    "port": 8766,
+    "silenceMs": 500,
+    "tts": "qwen",
+    "ttsLatin": "auto",
+    "ttsModel": "qwen3-tts-0.6b",
+    "ttsPort": 8768,
+    "ttsSpeed": 1,
+    "ttsVoiceName": "serena",
+    "vadModel": "silero-vad"
+  },
+  "keywords": {
+    "count": 84,
+    "sha256": "6b431b704db4ec13c61a4804dd56de7f2e0189845e3eab1b13e6450cc42ede57"
+  },
+  "mcp_build_fresh": true,
+  "mcp_registration": {
+    "args": [],
+    "command_is_this_build": true,
+    "env": [],
+    "type": "stdio"
+  },
+  "mcp_source_commit": "10f30c1",
+  "mode": "direct",
+  "models": {
+    "haas-ja-v1.0:f16": {
+      "fetched": true,
+      "file": "Haas-616M-ja-v1.0-F16.gguf",
+      "sha256": "f752e02f68c1dfff795900e40aa82e5302976fb5360080fcbd330d8b3c992cd8",
+      "size": 1233128832
+    },
+    "qwen3-tts-0.6b:q8_0": {
+      "fetched": true,
+      "file": "Qwen3-TTS-12Hz-0.6B-CustomVoice-Q8_0.gguf",
+      "sha256": "f606ea3981aa42762b16db9a94826d2d560eb60f0b102001618f40d5a2f78cc6",
+      "size": 1213534464
+    },
+    "silero-vad:f32": {
+      "fetched": true,
+      "file": "silero-vad-309K-v6.2-F32.gguf",
+      "sha256": "2fc312514e5fc4fa4ffd02b25c76a4853fa4130e8fb9777d01502183b01238cb",
+      "size": 1238624
+    }
+  },
+  "readings": {
+    "count": 40,
+    "sha256": "509a25052566d5e7edc9300f6753c184bb9ac286e05e0d9c29d82e7ccca4b17a"
+  },
+  "settings_overrides": {},
+  "speech_version": "0.11.2"
+}

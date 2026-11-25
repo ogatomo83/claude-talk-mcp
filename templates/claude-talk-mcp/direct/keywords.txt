@@ -1,0 +1,88 @@
+# 聞き取り (Haas) の語彙。組み込みの既定を上書き・削除する。書式: 表記=読み,読み / -表記 で外す
+# 「どっか」「どっちか」まで Docker になりやすいので、Docker の読みを「ドッカー」だけにしている
+# (既定は ドッカー,ドーカー,どうか)。まだ化けるなら下の行を -Docker に変える
+Docker=ドッカー
+
+# エンジニア用語。普段の会話に出る音 (ラスト、ナット、サイダー、ワフ など) は読みに入れない
+# クラウド (AWS)
+AWS=エーダブリューエス
+EC2=イーシーツー
+S3=エススリー
+Lambda=ラムダ
+IAM=アイアム
+VPC=ブイピーシー
+RDS=アールディーエス
+ECS=イーシーエス
+EKS=イーケーエス
+Fargate=ファーゲート
+DynamoDB=ダイナモディービー
+CloudFront=クラウドフロント
+CloudWatch=クラウドウォッチ
+Route 53=ルートフィフティースリー,ルートゴーサン
+# クラウド (GCP ほか)
+GCP=ジーシーピー
+GKE=ジーケーイー
+BigQuery=ビッグクエリ,ビッグクエリー
+Cloud Run=クラウドラン
+Firebase=ファイアベース
+Azure=アジュール
+Cloudflare=クラウドフレア
+Vercel=バーセル,ヴァーセル
+# ネットワーク
+DNS=ディーエヌエス
+TCP=ティーシーピー
+UDP=ユーディーピー
+HTTP=エイチティーティーピー
+HTTPS=エイチティーティーピーエス
+TLS=ティーエルエス
+SSL=エスエスエル
+SSH=エスエスエイチ
+VPN=ブイピーエヌ
+CDN=シーディーエヌ
+gRPC=ジーアールピーシー
+WebSocket=ウェブソケット
+Nginx=エンジンエックス
+# インフラ・運用
+Terraform=テラフォーム
+Ansible=アンシブル
+Helm=ヘルム
+Prometheus=プロメテウス
+Grafana=グラファナ
+Datadog=データドッグ
+Linux=リナックス
+Ubuntu=ウブントゥ,ウブンツ
+cron=クーロン
+CI/CD=シーアイシーディー
+# データベース
+PostgreSQL=ポストグレスキューエル,ポストグレス,ポスグレ
+MySQL=マイエスキューエル
+Redis=レディス,リディス
+MongoDB=モンゴディービー
+Kafka=カフカ
+# 開発
+Git=ギット
+API=エーピーアイ
+REST=レスト
+GraphQL=グラフキューエル
+JSON=ジェイソン
+YAML=ヤムル,ヤメル
+OAuth=オーオース
+JWT=ジェイダブリューティー
+React=リアクト
+Next.js=ネクストジェイエス
+Node.js=ノードジェイエス
+Neovim=ネオビム
+tmux=ティーマックス
+Homebrew=ホームブリュー
+Xcode=エックスコード
+VS Code=ブイエスコード
+# AI
+LLM=エルエルエム
+MCP=エムシーピー
+Anthropic=アンソロピック
+OpenAI=オープンエーアイ
+Claude Code=クロードコード
+Sonnet=ソネット
+Opus=オーパス
+Fable=フェイブル
+Gemini=ジェミニ

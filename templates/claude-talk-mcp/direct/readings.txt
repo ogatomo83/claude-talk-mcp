@@ -1,0 +1,9 @@
+# 読み上げ (Irodori) の前に英字を置き換える辞書。speak のたびに読み直す (再起動不要)。
+# 1 行 1 語: 表記=読み   (大文字小文字は区別しない。語の一部には当てない)
+# 組み込みの既定 (Docker, TypeScript, Kubernetes, Python, Claude, MCP, macOS, PR, GitHub など) を
+# 同じ表記で書くと上書き、-表記 で外す。
+# 辞書に無い英字は settings.json の ttsLatin で: auto (既定。大文字だけの 2〜6 文字はアルファベット読み、ほかはそのまま) / keep / spell
+#
+# 例:
+# Neovim=ネオビム
+# -Mac
