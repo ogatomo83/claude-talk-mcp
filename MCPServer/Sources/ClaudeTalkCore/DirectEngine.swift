@@ -8,6 +8,10 @@
 //  マイクは声の会話の間だけ開ける: speak / listen で開け、最後の呼び出しから micIdleCloseSeconds で閉じる。
 //  開けている間はリングに音を残すので、合図 (speak) の直後に話し始めても listen が頭から拾える (プリロール)。
 //
+//  読み上げ中の割り込み (settings の bargeIn、既定 on、T-0035): マイクを VoiceAudioEngine (VPIO) で開け、読み上げも同じ
+//  engine で鳴らす。読み上げの間も VAD + EchoGate で見張り、人の声なら止めて speak を返す (SpeakOutcome.interrupted)。
+//  その発話は次の listen が話し始めから受け取る (handoff)。bargeIn.enabled=false なら今までの動き。
+//
 
 import Foundation
 
@@ -27,8 +31,18 @@ public actor DirectEngine {
     private var speaker: Speaker?
     private let irodori = IrodoriSpeaker()
     private let makeInput: @Sendable () throws -> AudioInput
+    private let customMakeInput: (@Sendable () throws -> AudioInput)?
+    /// 今のマイクが割り込み用の共有 engine (VoiceAudioEngine) か
+    private var inputShared = false
+    /// テスト用: 読み上げの代わりにこの音 (24kHz mono Int16) を参照信号に流す (音は出さない)
+    private let testSpeakReference: Data?
+    private let testReferenceRing = AudioRing(retainSeconds: 15)
+    /// 割り込んだ (または読み上げの終わり際に話し始めた) 発話を、次の listen に話し始めから渡す。
+    private var handoff: (since: UInt64, at: UInt64, heard: String)?
 
-    public init(makeInput: (@Sendable () throws -> AudioInput)? = nil) {
+    public init(makeInput: (@Sendable () throws -> AudioInput)? = nil, testSpeakReference: Data? = nil) {
+        customMakeInput = makeInput
+        self.testSpeakReference = testSpeakReference
         self.makeInput = makeInput ?? {
             if let test = try WavFileInput.fromEnvironment() { return test }
             return MicInput()
@@ -68,29 +82,45 @@ public actor DirectEngine {
     /// 読み上げ。settings.tts が qwen (既定) / irodori なら speech serve で、届いた音をそばから鳴らし、鳴り終わってから返る。
     /// serve が立たない・まだ何も鳴らないうちに失敗した時は avspeech に落とす (timing.jsonl に speak.fallback)。
     /// voice に AVSpeech の identifier (com.apple.…) を渡した時は、その回だけ avspeech。
+    /// 戻り値: 最後まで鳴らしたら true。
     public func speak(text: String, voice: String?, rate: Double?, locale: String) async throws -> Bool {
+        try await speakOutcome(text: text, voice: voice, rate: rate, locale: locale).finished
+    }
+
+    /// speak の本体。bargeIn が有効なら、読み上げ中にユーザーが話した時に止めて interrupted を返す。
+    public func speakOutcome(text: String, voice: String?, rate: Double?, locale: String) async throws -> SpeakOutcome {
         let (settings, warning) = DirectSettings.load()
         let sw = Stopwatch()
         var kind = settings.ttsEngine
         if let voice, voice.hasPrefix("com.apple.") { kind = .avspeech }
-        log.event("speak.recv", mode: .direct, fields: ["chars": text.count, "tts": kind.rawValue]
+        let wantBarge = settings.bargeIn.enabled && kind != .avspeech
+        log.event("speak.recv", mode: .direct, fields: ["chars": text.count, "tts": kind.rawValue, "barge_in": wantBarge]
                   .merging(warning.map { ["warning": $0] } ?? [:]) { a, _ in a })
         busy += 1
         defer {
             busy -= 1
             scheduleIdleClose(after: settings.micIdleCloseSeconds)
         }
+        handoff = nil
+        // 割り込みの有無を切り替えた時は、マイクを開け直す (共有 engine ⇔ 別の engine)。
+        if input != nil, inputShared != wantBarge, busy == 1 {
+            closeMic(reason: "barge_in_\(wantBarge ? "on" : "off")")
+        }
         // 次の listen のプリロールのために、読み上げの間にマイクを開けておく (取れなければ listen で開ける)。
         if input == nil, micLock.tryLock() {
-            try? startInput()
+            try? startInput(shared: wantBarge, settings: settings)
         }
         speakEndAt = nil
         input?.trigger("speak_start")
-        var finished = false
+        var outcome = SpeakOutcome(finished: false, heardText: text, totalChars: text.count)
         var used = kind
         if kind != .avspeech {
             do {
-                finished = try await speakServe(text: text, kind: kind, settings: settings, sw: sw)
+                if wantBarge, inputShared, let ref = speakReferenceRing {
+                    outcome = try await speakBarge(text: text, kind: kind, settings: settings, reference: ref, sw: sw)
+                } else {
+                    outcome.finished = try await speakServe(text: text, kind: kind, settings: settings, sw: sw)
+                }
             } catch is CancellationError {
                 throw CancellationError()
             } catch let f as IrodoriFailure where f.audioStarted {
@@ -108,15 +138,117 @@ public actor DirectEngine {
             }
         }
         if used == .avspeech {
-            finished = await speakAV(text: text, voice: voice ?? settings.voice, rate: rate ?? settings.rate,
-                                     locale: locale, sw: sw)
+            outcome = SpeakOutcome(finished: await speakAV(text: text, voice: voice ?? settings.voice, rate: rate ?? settings.rate,
+                                                           locale: locale, sw: sw),
+                                   heardText: text, totalChars: text.count)
         }
         speakEndAt = PCM.now()
-        lastSpeak = (text, speakEndAt!)
+        lastSpeak = (outcome.interrupted ? outcome.heardText : text, speakEndAt!)
+        if let h = handoff { handoff = (h.since, speakEndAt!, lastSpeak!.text) }
         input?.trigger("speak_done")
-        log.event("speak.done", mode: .direct, fields: ["ms": sw.ms, "finished": finished, "tts": used.rawValue])
+        log.event("speak.done", mode: .direct, fields: ["ms": sw.ms, "finished": outcome.finished, "tts": used.rawValue,
+                                                        "interrupted": outcome.interrupted,
+                                                        "heard_chars": outcome.heardText.count,
+                                                        "near_end": outcome.userStartedNearEnd])
         try Task.checkCancellation()
-        return finished
+        return outcome
+    }
+
+    /// 割り込みの参照信号 (鳴らした音) のリング。共有 engine か、テストの参照信号。
+    private var speakReferenceRing: AudioRing? {
+        if testSpeakReference != nil { return testReferenceRing }
+        return (input as? VoiceAudioEngine)?.reference
+    }
+
+    /// 読み上げ中の割り込みあり: 共有 engine で文ごとに鳴らし、並行して VAD + EchoGate で見張る。
+    private func speakBarge(text: String, kind: TTSEngineKind, settings: DirectSettings, reference: AudioRing,
+                            sw: Stopwatch) async throws -> SpeakOutcome {
+        let log = self.log
+        let firstAudio = FlagBox()
+        let lastError = ErrorBox()
+        let player: SpeakPlayback
+        if let pcm = testSpeakReference {
+            player = WavReferencePlayback(pcm: pcm, reference: reference) {
+                firstAudio.value = true
+                log.event("speak.audio_start", mode: .direct, fields: ["ms": sw.ms, "tts": "test_reference"])
+            }
+        } else {
+            let swServer = Stopwatch()
+            let started = try await TTSServer(settings: settings).ensureRunning(timeout: settings.ttsStartTimeoutSeconds)
+            log.event("speak.tts_ready", mode: .direct, fields: ["ms": swServer.ms, "started": started])
+            player = ReplySpeaker(settings: settings, turn: 0, host: input as? VoiceAudioEngine) { stage in
+                switch stage {
+                case .firstAudio:
+                    firstAudio.value = true
+                    log.event("speak.audio_start", mode: .direct, fields: ["ms": sw.ms, "tts": kind.rawValue,
+                                                                           "speed": settings.ttsSpeedValue, "barge_in": true])
+                case .sentence:
+                    break
+                case .error(let m):
+                    lastError.value = m
+                    log.event("speak.tts_error", mode: .direct, fields: ["error": m])
+                }
+            }
+        }
+        var splitter = SentenceSplitter()
+        var sentences = splitter.feed(text) + splitter.flush()
+        if sentences.isEmpty { sentences = [text] }
+        let speakStart = PCM.now()
+        let watch = BargeInWatch(settings: settings, mic: ring, reference: reference, log: log)
+        let fired = FireBox()
+        let watchTask = Task.detached {
+            await watch.run(since: speakStart) { fire in
+                fired.value = fire
+                player.stop()
+            }
+        }
+        defer { watchTask.cancel() }
+        for s in sentences { player.enqueue(s) }
+        // 最初の音が来なければ打ち切る (その回は avspeech に落とせる)。
+        let watchdog = Task {
+            try? await Task.sleep(nanoseconds: UInt64(max(settings.ttsFirstAudioTimeoutSeconds, 0.5) * 1e9))
+            if !Task.isCancelled, !firstAudio.value {
+                lastError.value = "最初の音が \(settings.ttsFirstAudioTimeoutSeconds) 秒で届きません"
+                player.stop()
+            }
+        }
+        let played = await withTaskCancellationHandler {
+            await player.finish()
+        } onCancel: {
+            player.stop()
+        }
+        watchdog.cancel()
+        if Task.isCancelled { throw CancellationError() }
+        if !firstAudio.value {
+            throw IrodoriFailure(message: lastError.value ?? "音が 1 つも届きません", audioStarted: false)
+        }
+        let progress = player.progress
+        var outcome = SpeakOutcome(finished: played, heardText: progress.heardText, totalChars: text.count,
+                                   playedSeconds: progress.playedSeconds)
+        if let f = fired.value {
+            outcome.finished = false
+            outcome.interrupted = true
+            handoff = (f.handoffStart, PCM.now(), progress.heardText)
+            var fields: [String: Any] = ["ms": sw.ms, "heard_chars": progress.heardText.count, "total_chars": text.count,
+                                         "played_s": (progress.playedSeconds * 100).rounded() / 100,
+                                         "after_speech_start_ms": Int((f.firedAt &- f.audioStart) / 1_000_000),
+                                         "decided_after_start_ms": Int((f.decidedAt &- f.audioStart) / 1_000_000),
+                                         "rejections": f.rejections,
+                                         "handoff_back_ms": Int((f.audioStart &- f.handoffStart) / 1_000_000)]
+            if let v = f.verdict { fields["gate"] = v.fields }
+            log.event("speak.barge_in", mode: .direct, fields: fields)
+        } else {
+            outcome.heardText = played ? text : progress.heardText
+            if played, let start = watch.voiceStartNearEnd() {
+                // 読み終える直前に話し始めていた: 次の listen は話し始めから (読み上げの終わり + tail guard で切らない)
+                outcome.userStartedNearEnd = true
+                handoff = (start, PCM.now(), text)
+                log.event("speak.voice_near_end", mode: .direct,
+                          fields: ["before_end_ms": Int((PCM.now() &- start) / 1_000_000)])
+            }
+            if !watch.ready { log.event("speak.barge_unavailable", mode: .direct, fields: ["ms": sw.ms]) }
+        }
+        return outcome
     }
 
     private func speakAV(text: String, voice: String?, rate: Double?, locale: String, sw: Stopwatch) async -> Bool {
@@ -182,7 +314,7 @@ public actor DirectEngine {
         var openedNow = false
         if input == nil {
             guard await micLock.lock(timeout: settings.micLockWaitSeconds) else { throw TalkError.micBusy }
-            try startInput()
+            try startInput(shared: settings.bargeIn.enabled, settings: settings)
             openedNow = true
         }
         let listenAt = PCM.now()
@@ -193,26 +325,19 @@ public actor DirectEngine {
         let started = try await SpeechServer(settings: settings).ensureRunning()
         log.event("listen.server_ready", mode: .direct, fields: ["ms": swServer.ms, "started": started])
 
-        // 3) プリロール: 直前の speak の終わりから (無ければ listen の少し前から)
-        let maxBack = UInt64(settings.prerollMaxSeconds * 1e9)
-        var since = listenAt > UInt64(settings.prerollLeadSeconds * 1e9) ? listenAt - UInt64(settings.prerollLeadSeconds * 1e9) : 0
-        if let end = speakEndAt, end <= listenAt, listenAt - end <= maxBack { since = min(since, end) }
+        // 3) プリロール: 直前の speak の終わりから (無ければ listen の少し前から)。
+        //    読み上げ中に割り込んだ発話があれば、その話し始めから (handoff)。
+        let plan = Self.prerollPlan(listenAt: listenAt, speakEndAt: speakEndAt, lastSpeakEnd: lastSpeak?.endAt,
+                                    handoff: handoff.map { ($0.since, $0.at) }, settings: settings)
+        let usedHandoff = plan.handoff ? handoff : nil
+        handoff = nil
         speakEndAt = nil
-        // 読み上げの終わり + speakTailGuardMs より前の音は使わない (読み上げの最後を拾わない)。
-        // listen がそれより早く来た時は、始点が少し先になる (届いた音もその時刻までは送らない)。
-        var guardedMs = 0
-        if let last = lastSpeak, settings.speakTailGuardMs > 0 {
-            let floor = last.endAt &+ UInt64(settings.speakTailGuardMs) * 1_000_000
-            if since < floor {
-                guardedMs = Int((floor - since) / 1_000_000)
-                since = floor
-            }
-        }
+        let since = plan.since
         let nowMic = PCM.now()
         log.event("listen.mic_ready", mode: .direct, fields: [
             "opened_now": openedNow, "input": input?.name ?? "",
             "preroll_ms": nowMic >= since ? Int((nowMic - since) / 1_000_000) : -Int((since - nowMic) / 1_000_000),
-            "tail_guard_ms": guardedMs])
+            "tail_guard_ms": plan.guardedMs, "handoff": plan.handoff])
 
         // 4) Realtime
         let lang = Self.isoLanguage(locale, fallback: settings.language)
@@ -342,14 +467,54 @@ public actor DirectEngine {
                         "text": transcript, "score": v.verdict.score, "reason": v.verdict.reason,
                         "after_speak_end_ms": v.afterSpeakEndMs, "count": discardedEcho])
                 }
-                if case .finish(let text) = tracker.handle(tracked) { return text }
+                if case .finish(let text) = tracker.handle(tracked) {
+                    return stripHandoffEcho(text, handoff: usedHandoff, settings: settings)
+                }
                 if case .completed = ev, committedForLimit != nil, !tracker.speaking {
-                    return tracker.partialText
+                    return stripHandoffEcho(tracker.partialText, handoff: usedHandoff, settings: settings)
                 }
             }
         }
         if Task.isCancelled { throw CancellationError() }
         throw TalkError.realtime("セッションが途中で終わりました")
+    }
+
+    /// listen の音の始点。`handoff` (読み上げ中に割り込んだ発話の話し始め) があればそこから (tail guard を掛けない)。
+    /// 無ければ今まで通り: 直前の speak の終わり (prerollMaxSeconds 以内) か listen の prerollLeadSeconds 前の早い方。
+    /// ただし読み上げの終わり + speakTailGuardMs より前にはしない。
+    static func prerollPlan(listenAt: UInt64, speakEndAt: UInt64?, lastSpeakEnd: UInt64?,
+                            handoff: (since: UInt64, at: UInt64)?, settings: DirectSettings)
+        -> (since: UInt64, guardedMs: Int, handoff: Bool) {
+        if let h = handoff, listenAt >= h.at,
+           Double(listenAt - h.at) / 1e9 <= settings.bargeIn.handoffMaxSeconds {
+            let lead = UInt64(max(settings.bargeIn.handoffLeadMs, 0)) * 1_000_000
+            return (h.since > lead ? h.since - lead : 0, 0, true)
+        }
+        let maxBack = UInt64(settings.prerollMaxSeconds * 1e9)
+        let leadNs = UInt64(settings.prerollLeadSeconds * 1e9)
+        var since = listenAt > leadNs ? listenAt - leadNs : 0
+        if let end = speakEndAt, end <= listenAt, listenAt - end <= maxBack { since = min(since, end) }
+        // 読み上げの終わり + speakTailGuardMs より前の音は使わない (読み上げの最後を拾わない)。
+        // listen がそれより早く来た時は、始点が少し先になる (届いた音もその時刻までは送らない)。
+        var guardedMs = 0
+        if let end = lastSpeakEnd, settings.speakTailGuardMs > 0 {
+            let floor = end &+ UInt64(settings.speakTailGuardMs) * 1_000_000
+            if since < floor {
+                guardedMs = Int((floor - since) / 1_000_000)
+                since = floor
+            }
+        }
+        return (since, guardedMs, false)
+    }
+
+    /// 割り込んだ発話の書き起こしの頭が、読み上げの残り (聞こえた所までの文に似ている) なら外す。
+    private func stripHandoffEcho(_ text: String, handoff: (since: UInt64, at: UInt64, heard: String)?,
+                                  settings: DirectSettings) -> String {
+        guard let h = handoff, settings.bargeIn.echoFilter, !text.isEmpty else { return text }
+        let (rest, removed) = EchoFilter.stripEchoPrefix(transcript: text, spoken: h.heard, threshold: settings.echoSimilarity)
+        guard !removed.isEmpty, !rest.isEmpty else { return text }
+        log.event("listen.echo_prefix_removed", mode: .direct, fields: ["removed": removed, "kept": rest])
+        return rest
     }
 
     /// 書き起こしが直前の読み上げを拾ったものなら判定を返す (捨てる)。発話の始まりが読み上げの終わりから
@@ -392,15 +557,33 @@ public actor DirectEngine {
 
     // MARK: - マイクの開け閉め
 
-    private func startInput() throws {
+    /// shared なら録音と読み上げを 1 つの engine (VoiceAudioEngine、VPIO) で。テストの入力はその中に包む
+    /// (テストの参照信号を使う時は包まない: 出力の engine も使わない)。
+    private func startInput(shared: Bool, settings: DirectSettings) throws {
         ring.reset()
-        let inp = try makeInput()
+        testReferenceRing.reset()
+        let inp: AudioInput
         do {
+            if shared, testSpeakReference == nil {
+                let scripted = customMakeInput == nil ? try ScriptedWavInput.fromEnvironment() : nil
+                let test: AudioInput? = try customMakeInput?() ?? scripted ?? WavFileInput.fromEnvironment()
+                let engine = VoiceAudioEngine(options: settings.bargeIn.audioOptions, testInput: test)
+                // テスト: 鳴らした音 (参照信号) を小さくして遅らせ、マイクの音に足す (CLAUDE_TALK_VOICE_TEST_ECHO = dB@ms)
+                if let scripted, let e = ScriptedWavInput.parseEcho(ProcessInfo.processInfo.environment["CLAUDE_TALK_VOICE_TEST_ECHO"]) {
+                    scripted.echo = (engine.reference, e.gainDb, e.delayMs)
+                }
+                let log = self.log
+                engine.onEvent = { name, fields in log.event(name, mode: .direct, fields: fields) }
+                inp = engine
+            } else {
+                inp = try makeInput()
+            }
             try inp.start(into: ring)
         } catch {
             micLock.unlock()
             throw error
         }
+        inputShared = shared
         input = inp
         micVerified = false
         log.event("mic.open", mode: .direct, fields: ["input": inp.name])

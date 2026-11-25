@@ -394,20 +394,8 @@ public actor VoiceSession {
 
     /// 割り込みの判定 (層 2): 直近 bargeInMs のマイクの音が人の声か、読み上げのエコーか。
     private func gateVerdict(_ item: String) -> EchoGate.Verdict {
-        let g = voice.echoGate
-        let now = PCM.now()
-        var to = min(now, ring.stats.lastDataAt ?? now)
-        // 参照信号が流れている時は、届いている所まで (tap は少し遅れて届く。無い所を「静か」と見ないように)
-        if let r = audio?.reference.stats.lastDataAt, r + 500_000_000 > now, r < to { to = r }
-        let b = UInt64(max(voice.bargeInMs, 100)) * 1_000_000
-        let s = itemAudioStart[item] ?? (to > b ? to - b : 0)
-        let winStart = max(s, to > b ? to - b : 0)
-        let back = UInt64(g.historyMs + g.maxLagMs) * 1_000_000
-        let from = winStart > back ? winStart - back : 0
-        let mic = ring.samples(from: from, to: to)
-        let ref = audio?.reference.samples(from: from, to: to) ?? [Int16](repeating: 0, count: mic.count)
-        let judgeFrom = PCM.bytes(nanoseconds: winStart - from) / 2
-        return EchoGate.evaluate(mic: mic, ref: ref, judgeFrom: judgeFrom, config: g)
+        EchoGate.evaluateRings(mic: ring, reference: audio?.reference, itemAudioStart: itemAudioStart[item],
+                               now: PCM.now(), bargeInMs: voice.bargeInMs, config: voice.echoGate)
     }
 
     private func bargeInIfStillSpeaking(_ item: String) {

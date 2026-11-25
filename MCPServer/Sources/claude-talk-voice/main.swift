@@ -14,6 +14,7 @@
 //  テスト: CLAUDE_TALK_VOICE_TEST_SCRIPT (WAV を順に流す)、CLAUDE_TALK_VOICE_TEST_ECHO (エコーの模擬 dB@ms)、
 //        CLAUDE_TALK_TTS_VOLUME=0、CLAUDE_TALK_VOICE_TTS_DUMP_DIR
 //  開発用: --eval-echo-gate SPEC.json (録音済みの WAV で割り込み判定を数える。EvalEchoGate.swift)
+//         --eval-speak-barge SPEC.json (MCP の speak の割り込みを通しで数える。EvalSpeakBarge.swift)
 //
 
 import ClaudeTalkCore
@@ -75,6 +76,30 @@ while !args.isEmpty {
     case "--eval-echo-gate":
         // 開発用: 音を出さずに割り込み判定を数える (EvalEchoGate.swift)
         do { try EchoGateEval.run(specPath: value()); exit(0) } catch { print("eval: \(error)"); exit(1) }
+    case "--eval-speak-live":
+        // 開発用: MCP の speak (本物の読み上げ、音量は CLAUDE_TALK_TTS_VOLUME) → 割り込まれたら listen、を 1 回
+        let text = value()
+        Task {
+            let e = DirectEngine.shared
+            do {
+                let o = try await e.speakOutcome(text: text, voice: nil, rate: nil, locale: "ja-JP")
+                print("speak: \(o.toolText.replacingOccurrences(of: "\n", with: " / ")) played_s \(o.playedSeconds)")
+                if o.interrupted || o.userStartedNearEnd {
+                    let heard = try await e.listen(timeout: 8, locale: "ja-JP")
+                    print("listen: \(heard)")
+                }
+                await e.closeMic(reason: "eval")
+                exit(0)
+            } catch { print("eval: \(error)"); exit(1) }
+        }
+        dispatchMain()
+    case "--eval-speak-barge":
+        // 開発用: MCP の speak の割り込みを音を出さずに通しで数える (EvalSpeakBarge.swift)
+        let spec = value()
+        Task {
+            do { try await SpeakBargeEval.run(specPath: spec); exit(0) } catch { print("eval: \(error)"); exit(1) }
+        }
+        dispatchMain()
     case "-h", "--help": usage()
     default:
         print("知らない引数: \(a)")

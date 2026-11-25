@@ -98,6 +98,10 @@ public enum PCM {
 public struct AudioPiece: Sendable {
     public let start: UInt64
     public let data: Data
+    public init(start: UInt64, data: Data) {
+        self.start = start
+        self.data = data
+    }
     public var end: UInt64 { start &+ PCM.nanoseconds(bytes: data.count) }
 
     /// `since` より後の部分 (サンプル境界にそろえる)。全部 `since` 以前なら nil。

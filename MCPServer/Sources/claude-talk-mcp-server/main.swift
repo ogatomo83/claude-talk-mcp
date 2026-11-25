@@ -18,7 +18,7 @@ let timing = TimingLog.shared
 
 let server = Server(
     name: "claude-talk-mcp",
-    version: "1.1.0",
+    version: "1.2.0",
     capabilities: .init(tools: .init(listChanged: false))
 )
 
@@ -26,7 +26,7 @@ let server = Server(
 
 let speakTool = Tool(
     name: "speak",
-    description: "与えられたテキストを読み上げる (direct モードは既定で Qwen3-TTS 0.6B の serena、app モードは macOS の音声)。音が鳴り終わるまで待機する。",
+    description: "与えられたテキストを読み上げる (direct モードは既定で Qwen3-TTS 0.6B の serena、app モードは macOS の音声)。音が鳴り終わるまで待機する。返り値の 1 行目は done (最後まで読んだ) / interrupted (読み上げ中にユーザーが話し始めたので止めた。読み上げた所が続く。すぐ listen を呼ぶと、その発話を頭から受け取れる) / stopped。",
     inputSchema: .object([
         "type": .string("object"),
         "properties": .object([
@@ -146,12 +146,13 @@ await server.withMethodHandler(CallTool.self) { params in
             }
         case .direct:
             do {
-                let finished = try await DirectEngine.shared.speak(
+                // 1 行目: done (最後まで) / stopped (止められた) / interrupted (読み上げ中にユーザーが話した。続きに説明)
+                let outcome = try await DirectEngine.shared.speakOutcome(
                     text: text,
                     voice: args?["voice"]?.stringValue,
                     rate: number(args?["rate"]),
                     locale: args?["locale"]?.stringValue ?? "ja-JP")
-                return .init(content: [.text(finished ? "done" : "stopped")], isError: false)
+                return .init(content: [.text(outcome.toolText)], isError: false)
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
@@ -196,7 +197,7 @@ await server.withMethodHandler(CallTool.self) { params in
 
 // MARK: - 起動
 
-timing.event("server.start", mode: TalkMode.current(), fields: ["version": "1.1.0"])
+timing.event("server.start", mode: TalkMode.current(), fields: ["version": "1.2.0"])
 if TalkMode.current() == .direct {
     // 初回 listen の待ちを減らすため、speech serve を先に起こしておく。
     Task { await DirectEngine.shared.prewarm() }

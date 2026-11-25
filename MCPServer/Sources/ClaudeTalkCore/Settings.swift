@@ -138,6 +138,11 @@ public struct DirectSettings: Decodable, Equatable, Sendable {
     /// 辞書に無い英字の扱い: `auto` (大文字だけの 2〜6 文字はアルファベット読み、ほかはそのまま) / `keep` / `spell`。
     public var ttsLatin: String = "auto"
 
+    // MARK: 読み上げ中の割り込み (T-0035)
+
+    /// speak の読み上げ中にユーザーが話したら止めて返す。`{"bargeIn": {"enabled": false}}` で今までの動き。
+    public var bargeIn: BargeInSettings = BargeInSettings()
+
     /// speech serve の待ち受けポート (127.0.0.1 固定)。既定 qwen 8768 / irodori 8767。
     public var ttsPort: Int {
         get { ttsPortOverride ?? ttsProfile.port }
@@ -173,6 +178,7 @@ public struct DirectSettings: Decodable, Equatable, Sendable {
         case voice, rate
         case tts, ttsPort, ttsModel, ttsVoiceName, ttsVoiceFile, ttsInstructions, ttsSpeed, ttsSeed
         case ttsStartTimeoutSeconds, ttsFirstAudioTimeoutSeconds, ttsLatin
+        case bargeIn
     }
 
     public init(from decoder: Decoder) throws {
@@ -210,6 +216,7 @@ public struct DirectSettings: Decodable, Equatable, Sendable {
         ttsStartTimeoutSeconds = try c.decodeIfPresent(Double.self, forKey: .ttsStartTimeoutSeconds) ?? d.ttsStartTimeoutSeconds
         ttsFirstAudioTimeoutSeconds = try c.decodeIfPresent(Double.self, forKey: .ttsFirstAudioTimeoutSeconds) ?? d.ttsFirstAudioTimeoutSeconds
         ttsLatin = try c.decodeIfPresent(String.self, forKey: .ttsLatin) ?? d.ttsLatin
+        bargeIn = try c.decodeIfPresent(BargeInSettings.self, forKey: .bargeIn) ?? d.bargeIn
     }
 
     /// 設定ファイルを読む。無い・壊れている時は既定値 (壊れている時は warning を返す)。
