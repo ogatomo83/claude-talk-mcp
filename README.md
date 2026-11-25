@@ -47,7 +47,7 @@ cd ~/claude-talk-mcp
 scripts/install.sh --serve-test
 ```
 
-何度流してもよい (済んでいるものは確かめて飛ばす)。初回は 10〜20 分 (ほとんどがモデルの取得と `swift build`)。やること:
+何度流してもよい (済んでいるものは確かめて飛ばす)。初回は数分〜20 分 (ほとんどがモデル 2.4 GB の取得と `swift build`。速い回線なら 2 分ほど)。やること:
 
 1. 前提の確認
 2. speech.cpp **0.11.2** を `~/.local/bin/speech` に入れる (公式インストーラ、SHA256SUMS で照合。PATH・`.zshrc` は変えない)
@@ -64,9 +64,9 @@ scripts/install.sh --serve-test
   ok    38 項目すべて基準と同じ (speech.cpp 0.11.2、語彙 84 語、読み 40 語、tts qwen / serena、bargeIn on、MCP のビルド 9a5b66d)
 ==> serve の通し (別ポート 18766 / 18768、音は出さない)
   ok    MCP サーバーが 2 つの serve を起動 (…秒)
-  ok    聞き取りの serve: haas-ja-v1.0, silero-vad
+  ok    聞き取りの serve: Haas-ja-v1.0, silero-vad
   ok    読み上げ: 「今日は良い天気ですね。」→ WAV … KB (…秒、再生はしない)
-  ok    聞き取り: 「今日は良い天気ですね。」 (…秒)
+  ok    聞き取り: 「今日はいい天気ですね」 (…秒)
   ok    テスト用の serve (pid …, :18766) を止めました
   ok    テスト用の serve (pid …, :18768) を止めました
 
