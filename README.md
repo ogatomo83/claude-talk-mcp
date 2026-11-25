@@ -299,6 +299,28 @@ MCPServer/ や雛形を変えて commit したら、その Mac で `/usr/bin/pyt
 - マイクの許可が外れる: Clean Build Folder で再署名されると外れることがある。`tccutil reset Microphone <アプリの bundle id>` → 再起動 → 許可し直し
 - Xcode に `Combine` / `@Observable` の赤エラー: SourceKit のマクロ展開の幽霊エラー。実ビルドは通る。Clean Build Folder か Xcode の再起動で消える
 - 認識サーバーに繋がらない: `~/.claude-talk-mcp/asr/start-server.sh` を手で動かしてログを見る。`curl http://127.0.0.1:8765/health`
+- 配布アプリ (Releases の zip) が「開発元を確認できません」で開けない: アドホック署名 (未 notarize) のため。Finder で右クリック →「開く」で一度許可すれば以後は通常起動できる
+
+### コマンドラインでまとめてビルド (make、Xcode 本体が要る)
+
+`make` で app モードの MCP サーバーと音声アプリを一括ビルドし、`dist/` に出す。direct モードの準備 (speech.cpp・モデル・登録) は `scripts/install.sh` が行うので、direct モードだけなら `make` は要らない。
+
+```bash
+make build      # → dist/claude-talk-mcp.app, dist/claude-talk-mcp-server
+make zip        # → dist/claude-talk-mcp-app-macos.zip (配布用)
+make clean      # build/ dist/ MCPServer/.build を消す (install.sh で登録したバイナリも消えるので、後で install.sh を流し直す)
+```
+
+アプリはアドホック署名 (`Signature=adhoc`) で出力され、マイク用 entitlement も埋め込まれる。
+
+### ビルド済みのダウンロード
+
+[Releases](../../releases) からビルド済みの `.app` (zip) と MCP サーバーのバイナリを入手できる (app モード用。direct モードは上の手順 1〜2 で clone と install.sh を使う)。
+
+- **自動**: タグ (`v*`) を push すると GitHub Actions (`.github/workflows/release.yml`) が macOS でビルドして Release を作る。手動実行の時は Actions のアーティファクトとしてもダウンロードできる
+- **手元から**: `make release VERSION=v0.1.0` (`gh` の認証が要る)
+
+配布アプリは未 notarize なので初回は右クリック →「開く」。ASR サーバーは別に `./asr/setup.sh` が要る。CI のランナーには macOS 26 SDK / Xcode 26 が要り、未対応なら手元の `make release` を使う。
 
 ## ライセンス
 

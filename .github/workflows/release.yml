@@ -1,0 +1,50 @@
+name: Build & Release
+
+# タグ push (v*) で macOS ビルドし、成果物を Release にアップロードする。
+# 手動実行 (workflow_dispatch) では Actions のアーティファクトとしてダウンロード可。
+#
+# 注意: アプリのデプロイターゲットは macOS 26 / Swift 6 のため、ランナーに
+# Xcode 26 (macOS 26 SDK) が必要。GitHub ランナーが未対応の場合は、ローカルの
+# `make release VERSION=vX.Y.Z` を使うのが確実。
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Xcode version
+        run: xcodebuild -version
+
+      - name: Build (MCP server + app)
+        run: make build
+
+      - name: Zip app
+        run: make zip
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-talk-mcp-macos
+          path: |
+            dist/claude-talk-mcp-app-macos.zip
+            dist/claude-talk-mcp-server
+
+      - name: Create GitHub Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/claude-talk-mcp-app-macos.zip \
+            dist/claude-talk-mcp-server \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "Automated macOS build. アプリはアドホック署名（初回は右クリック→開く）。ASR は README の setup.sh を参照。"
