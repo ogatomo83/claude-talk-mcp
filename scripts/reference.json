@@ -8,6 +8,13 @@
       "enabled": true,
       "voiceProcessing": true
     },
+    "capsLock": {
+      "enabled": true,
+      "leadMs": 150,
+      "offMaxWaitSeconds": 300,
+      "pollMs": 50,
+      "source": "flags"
+    },
     "language": "ja",
     "port": 8766,
     "silenceMs": 500,
@@ -30,7 +37,7 @@
     "env": [],
     "type": "stdio"
   },
-  "mcp_source_commit": "9a5b66d",
+  "mcp_source_commit": "10f30c1",
   "mode": "direct",
   "models": {
     "haas-ja-v1.0:f16": {

@@ -62,7 +62,7 @@ scripts/install.sh --serve-test
 
 ```
 ==> 基準との一致 (scripts/reference.json)
-  ok    38 項目すべて基準と同じ (speech.cpp 0.11.2、語彙 84 語、読み 40 語、tts qwen / serena、bargeIn on、MCP のビルド 9a5b66d)
+  ok    43 項目すべて基準と同じ (speech.cpp 0.11.2、語彙 84 語、読み 40 語、tts qwen / serena、bargeIn on、capsLock on、MCP のビルド 10f30c1)
 ==> serve の通し (別ポート 18766 / 18768、音は出さない)
   ok    MCP サーバーが 2 つの serve を起動 (…秒)
   ok    聞き取りの serve: Haas-ja-v1.0, silero-vad
@@ -122,7 +122,7 @@ cd ~/claude-talk-mcp
 ==> Claude Code への登録 (~/.claude.json)
   ok    claude-talk -> ~/claude-talk-mcp/MCPServer/.build/arm64-apple-macosx/release/claude-talk-mcp-server (stdio, args [], env 無し)
 ==> 基準との一致 (scripts/reference.json)
-  ok    38 項目すべて基準と同じ (speech.cpp 0.11.2、語彙 84 語、読み 40 語、tts qwen / serena、bargeIn on、MCP のビルド 9a5b66d)
+  ok    43 項目すべて基準と同じ (speech.cpp 0.11.2、語彙 84 語、読み 40 語、tts qwen / serena、bargeIn on、capsLock on、MCP のビルド 10f30c1)
 
 全部通りました。マイクの許可だけは音を出さずに確かめられないので、初回の /voice で許可してください。
 ```
@@ -140,7 +140,7 @@ cd ~/claude-talk-mcp
 | `settings.json` | `{}` (上書き無し = 全部コードの既定値) |
 | 効いている既定値 | `tts`=qwen、`ttsModel`=qwen3-tts-0.6b、`ttsVoiceName`=serena、`ttsPort`=8768、`port`=8766、`asrModel`=haas-ja-v1.0:f16、`vadModel`=silero-vad、`silenceMs`=500、`ttsSpeed`=1、`bargeIn.enabled`=true、`bargeIn.bargeInMs`=300、`capsLock.enabled`=true |
 | `mode` | direct |
-| MCP サーバー | MCPServer/ の最後の commit `9a5b66d` から、変更なしでビルドしたもの |
+| MCP サーバー | MCPServer/ の最後の commit `10f30c1` から、変更なしでビルドしたもの |
 | MCP の登録 | user スコープ、stdio、args 無し、env 無し、コマンドはこのリポのビルド |
 | skill | リポの `skills/voice/SKILL.md` と同じ |
 
