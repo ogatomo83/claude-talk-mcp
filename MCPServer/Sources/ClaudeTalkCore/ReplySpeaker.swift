@@ -48,8 +48,10 @@ public final class ReplySpeaker: @unchecked Sendable {
     private var sentenceTexts: [String] = []
     private var scheduledFrames = 0
     private var dumpFile: AVAudioFile?
+    /// 録音と同じ engine (VPIO) で鳴らす時の engine。nil なら返事ごとに自分の engine を持つ (段 a と同じ)。
+    private let host: VoiceAudioEngine?
 
-    public init(settings: DirectSettings, turn: Int,
+    public init(settings: DirectSettings, turn: Int, host: VoiceAudioEngine? = nil,
                 volume: Float? = ProcessInfo.processInfo.environment["CLAUDE_TALK_TTS_VOLUME"].flatMap(Float.init),
                 dumpDir: URL? = ProcessInfo.processInfo.environment["CLAUDE_TALK_VOICE_TTS_DUMP_DIR"]
                     .flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0, isDirectory: true) },
@@ -59,6 +61,7 @@ public final class ReplySpeaker: @unchecked Sendable {
         self.volume = volume
         self.dumpDir = dumpDir
         self.onStage = onStage
+        self.host = host
         worker = Task.detached { [weak self] in await self?.run() ?? false }
     }
 
@@ -195,7 +198,7 @@ public final class ReplySpeaker: @unchecked Sendable {
                     case .header(let rate):
                         if player == nil {
                             let p = try StreamPlayer(sampleRate: rate, outputFile: nil, volume: volume,
-                                                     speed: settings.ttsLocalSpeed, probe: nil)
+                                                     speed: settings.ttsLocalSpeed, probe: nil, host: host)
                             let ok: Bool = locked {
                                 if stopped { return false }
                                 player = p

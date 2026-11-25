@@ -64,6 +64,31 @@ public enum EchoFilter {
                        reason: scoreR > score ? "similar_reading" : "similar")
     }
 
+    /// 書き起こしの頭の、読み上げの残りの部分を外す (claude-talk-voice の割り込み: 読み上げのエコーで始まった発話に
+    /// ユーザーの声が続くと、1 つの書き起こしにつながる。例「日本の四季のことですね。ちょっと待って…」)。
+    /// 句読点 (。、！？?!) で区切った頭から順に、読み上げ文と似ている間だけ外す。全部似ていれば空 (= 全部エコー)。
+    /// 2 文字以下の区切りは単独では判定しない (「はい、」などユーザーの言葉と区別できない)。
+    public static func stripEchoPrefix(transcript: String, spoken: String, threshold: Double) -> (rest: String, removed: String) {
+        guard threshold > 0, !spoken.isEmpty else { return (transcript, "") }
+        var clauses: [String] = []
+        var cur = ""
+        for ch in transcript {
+            cur.append(ch)
+            if "。、！？?!．，,".contains(ch) { clauses.append(cur); cur = "" }
+        }
+        if !cur.isEmpty { clauses.append(cur) }
+        var removed = ""
+        var i = 0
+        while i < clauses.count {
+            let c = clauses[i]
+            guard normalize(c).count >= 3, judge(transcript: c, spoken: spoken, threshold: threshold).isEcho else { break }
+            removed += c
+            i += 1
+        }
+        let rest = clauses[i...].joined().trimmingCharacters(in: .whitespacesAndNewlines)
+        return (rest, removed)
+    }
+
     /// 1 - (近似部分一致の編集距離 / t の長さ)。
     static func similarity(_ t: [Character], _ s: [Character]) -> Double {
         guard !t.isEmpty, !s.isEmpty else { return 0 }

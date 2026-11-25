@@ -43,7 +43,32 @@ public struct VoiceSettings: Codable, Equatable, Sendable {
     /// claude に足す引数 (そのまま渡す)。
     public var extraArgs: [String] = []
 
+    // MARK: スピーカーで使うための層 (段 b)。どれも個別に切れる。
+    /// 層 1a: 録音と読み上げを 1 つの AVAudioEngine で行う (false なら段 a と同じく返事ごとに別の engine で鳴らす)。
+    public var sharedEngine: Bool = true
+    /// 層 1b: voice processing (VPIO: エコー除去・ノイズ抑制)。sharedEngine が false だと効かない (別の engine の音は消えない)。
+    public var voiceProcessing: Bool = true
+    /// VPIO の AGC (自動で音量を上げる)。既定は切る。
+    public var vpAGC: Bool = false
+    /// VPIO が他のアプリの音を下げる度合い: default / min / mid / max (macOS 14 以降)。
+    public var vpDucking: String = "min"
+    /// true なら、こちらが音を出している時だけ他のアプリの音を下げる (macOS 14 以降)。
+    public var vpAdvancedDucking: Bool = false
+    /// 層 2: 読み上げ中の割り込みを「人の声だけ」で止める判定 (EchoGate)。enabled=false で段 a と同じ。
+    public var echoGate: EchoGateConfig = EchoGateConfig()
+    /// 層 3: 書き起こしが直前・今の読み上げ文と似ていたら捨てる (似ている度合いは direct/settings.json の echoSimilarity)。
+    public var echoFilter: Bool = true
+
     public init() {}
+
+    public var audioOptions: VoiceAudioEngine.Options {
+        var o = VoiceAudioEngine.Options()
+        o.voiceProcessing = voiceProcessing
+        o.agc = vpAGC
+        o.ducking = vpDucking
+        o.advancedDucking = vpAdvancedDucking
+        return o
+    }
 
     public static let defaultSystemPrompt = """
     これは音声の会話です。あなたの返事はそのまま日本語で読み上げられ、ユーザーは耳で聞きます。
@@ -58,6 +83,7 @@ public struct VoiceSettings: Codable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
         case claudeBin, cwd, model, tools, allowTools, strictMcp, appendSystemPrompt, bargeInMs, tellInterrupted
         case firstChunkMinChars, extraArgs
+        case sharedEngine, voiceProcessing, vpAGC, vpDucking, vpAdvancedDucking, echoGate, echoFilter
     }
 
     public init(from decoder: Decoder) throws {
@@ -74,6 +100,13 @@ public struct VoiceSettings: Codable, Equatable, Sendable {
         tellInterrupted = try c.decodeIfPresent(Bool.self, forKey: .tellInterrupted) ?? d.tellInterrupted
         firstChunkMinChars = try c.decodeIfPresent(Int.self, forKey: .firstChunkMinChars) ?? d.firstChunkMinChars
         extraArgs = try c.decodeIfPresent([String].self, forKey: .extraArgs) ?? d.extraArgs
+        sharedEngine = try c.decodeIfPresent(Bool.self, forKey: .sharedEngine) ?? d.sharedEngine
+        voiceProcessing = try c.decodeIfPresent(Bool.self, forKey: .voiceProcessing) ?? d.voiceProcessing
+        vpAGC = try c.decodeIfPresent(Bool.self, forKey: .vpAGC) ?? d.vpAGC
+        vpDucking = try c.decodeIfPresent(String.self, forKey: .vpDucking) ?? d.vpDucking
+        vpAdvancedDucking = try c.decodeIfPresent(Bool.self, forKey: .vpAdvancedDucking) ?? d.vpAdvancedDucking
+        echoGate = try c.decodeIfPresent(EchoGateConfig.self, forKey: .echoGate) ?? d.echoGate
+        echoFilter = try c.decodeIfPresent(Bool.self, forKey: .echoFilter) ?? d.echoFilter
     }
 
     public static func load(from url: URL = TalkPaths.voiceSettingsFile) -> (VoiceSettings, String?) {

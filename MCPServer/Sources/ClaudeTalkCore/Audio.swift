@@ -177,6 +177,12 @@ public final class AudioRing: @unchecked Sendable {
         return (backlog, stream, id)
     }
 
+    /// 残っている断片の写し (古い順)。
+    public func snapshot() -> [AudioPiece] {
+        lock.lock(); defer { lock.unlock() }
+        return pieces
+    }
+
     public func unsubscribe(_ id: Int) {
         lock.lock()
         let c = subscribers.removeValue(forKey: id)

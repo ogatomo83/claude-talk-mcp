@@ -365,3 +365,44 @@ final class ReplySpeakerLiveTests: XCTestCase {
         }
     }
 }
+
+/// 段 b: 読み上げを録音と同じ engine (VoiceAudioEngine) で鳴らす。音量 0 でも参照信号は鳴らした音そのもの (ノードの音量の前) が
+/// 時刻付きで残り、止める・最後まで鳴らすの動きは今までと同じ。マイクは開かない (テスト用の無音入力)。
+final class SharedEngineLiveTests: XCTestCase {
+    func testSharedEnginePlaysAndFeedsReference() async throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let port = env["CLAUDE_TALK_TTS_BENCH_PORT"].flatMap(Int.init) else {
+            throw XCTSkip("CLAUDE_TALK_TTS_BENCH_PORT が無い")
+        }
+        var s = DirectSettings()
+        if let engine = env["CLAUDE_TALK_TTS_BENCH_ENGINE"] { s.tts = engine }
+        s.ttsPort = port
+        s.ttsSpeed = 1.2   // TimePitch も同じ engine に入る
+        let host = VoiceAudioEngine(options: .init(), testInput: try WavFileInput(spec: "silent"))
+        let mic = AudioRing(retainSeconds: 15)
+        try host.start(into: mic)
+        defer { host.stop() }
+        let t0 = PCM.now()
+        let a = ReplySpeaker(settings: s, turn: 1, host: host, volume: 0, dumpDir: nil, onStage: { _ in })
+        a.enqueue("うん、わかりました。")
+        a.enqueue("テストは全部通りました。")
+        let done = await a.finish()
+        XCTAssertTrue(done)
+        XCTAssertGreaterThan(a.progress.playedSeconds, 1.0)
+        let ref = host.reference.samples(from: t0, to: PCM.now())
+        let db = EchoGate.frameDb(ref)
+        let loud = db.filter { $0 > -40 }.count
+        print("[shared] ref frames \(db.count) loud \(loud) max \(db.max() ?? -100)")
+        XCTAssertGreaterThan(loud, 50, "参照信号に読み上げの音が残る (音量 0 の前)")
+        XCTAssertGreaterThan(mic.stats.bytes, 0, "テスト入力も同じ ring に届く")
+        // 2 つ目の返事も同じ engine に繋げて、途中で止められる
+        let b = ReplySpeaker(settings: s, turn: 2, host: host, volume: 0, dumpDir: nil, onStage: { _ in })
+        b.enqueue("今は同じ engine で読み上げています。止めたらすぐ止まります。")
+        try await Task.sleep(nanoseconds: 1_200_000_000)
+        let heard = b.stop()
+        let finished = await b.finish()
+        XCTAssertFalse(finished)
+        XCTAssertGreaterThan(heard.playedSeconds, 0)
+        XCTAssertTrue(host.engine.isRunning, "返事を止めても共有の engine は動いたまま")
+    }
+}

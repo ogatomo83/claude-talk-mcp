@@ -9,6 +9,9 @@
 //    合図: ready (聞き始めた) / tts_audio (返事の最初の音) / reply_done (返事を読み終えた) / sent (claude に送った)
 //    例: `/tmp/q1.wav@ready+300;/tmp/q2.wav@tts_audio+1500;/tmp/q3.wav@reply_done+500`
 //
+//  エコーの模擬 (環境変数 CLAUDE_TALK_VOICE_TEST_ECHO = `dB@ms`、例 `-35@150`): 読み上げの参照信号 (実際に鳴らした音) を
+//  dB だけ小さくし ms 遅らせてマイクの音に足す (スピーカーの音がマイクに戻る代わり。音は出さない)。
+//
 
 import Foundation
 
@@ -30,6 +33,16 @@ public final class ScriptedWavInput: AudioInput, @unchecked Sendable {
     /// 全部流し終えた時に呼ぶ。
     public var onFinished: (@Sendable () -> Void)?
     private var finishedReported = false
+    /// エコーの模擬: 参照信号を gainDb だけ小さく delayMs 遅らせて足す。
+    public var echo: (source: AudioRing, gainDb: Double, delayMs: Int)?
+
+    /// `dB@ms` を読む (CLAUDE_TALK_VOICE_TEST_ECHO)。
+    public static func parseEcho(_ s: String?) -> (gainDb: Double, delayMs: Int)? {
+        guard let s, !s.isEmpty else { return nil }
+        let p = s.split(separator: "@")
+        guard let g = Double(p[0]) else { return nil }
+        return (g, p.count > 1 ? Int(p[1]) ?? 150 : 150)
+    }
 
     public init(clips: [Clip]) {
         self.clips = clips
@@ -121,9 +134,22 @@ public final class ScriptedWavInput: AudioInput, @unchecked Sendable {
 
     private func nextChunk(bytes: Int, at start: UInt64) -> Data {
         var out = Data(count: bytes)
+        var echoSamples: [Int16] = []
+        var echoGain = 0.0
+        if let e = echo {
+            let d = UInt64(max(0, e.delayMs)) * 1_000_000
+            if start > d {
+                echoSamples = e.source.samples(from: start - d, to: start - d + PCM.nanoseconds(bytes: bytes))
+                echoGain = pow(10, e.gainDb / 20)
+            }
+        }
         out.withUnsafeMutableBytes { raw in
             let s = raw.bindMemory(to: Int16.self)
-            for i in 0..<s.count { s[i] = Int16.random(in: -40...40) }
+            for i in 0..<s.count {
+                var v = Double(Int16.random(in: -40...40))
+                if i < echoSamples.count { v += Double(echoSamples[i]) * echoGain }
+                s[i] = Int16(max(-32768, min(32767, v.rounded())))
+            }
         }
         lock.lock()
         defer { lock.unlock() }
@@ -133,7 +159,15 @@ public final class ScriptedWavInput: AudioInput, @unchecked Sendable {
         let lead = start >= p.startAt ? 0 : PCM.bytes(nanoseconds: p.startAt - start)
         let n = min(bytes - lead, wav.count - p.offset)
         if n > 0 {
-            out.replaceSubrange(lead..<(lead + n), with: wav.subdata(in: p.offset..<(p.offset + n)))
+            // 発話はエコーの上に足す (人が読み上げに重ねて話す)
+            out.withUnsafeMutableBytes { raw in
+                let o = raw.bindMemory(to: Int16.self)
+                wav.withUnsafeBytes { wraw in
+                    let w = wraw.bindMemory(to: Int16.self)
+                    let o0 = lead / 2, w0 = p.offset / 2
+                    for i in 0..<(n / 2) { o[o0 + i] = Int16(max(-32768, min(32767, Int(o[o0 + i]) + Int(w[w0 + i])))) }
+                }
+            }
             p.offset += n
         }
         playing = p

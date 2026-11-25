@@ -261,8 +261,10 @@ final class PCMHTTPStream: NSObject, URLSessionDataDelegate, @unchecked Sendable
 /// 届いた PCM を順に鳴らす。finishAndWait() は最後のバッファが出力まで出た (.dataPlayedBack) 時に返る。
 /// speed が 1 以外なら PlayerNode → AVAudioUnitTimePitch → mainMixer (高さを変えずに速さだけ変える)。
 final class StreamPlayer: @unchecked Sendable {
-    let engine = AVAudioEngine()
+    let engine: AVAudioEngine
     let node = AVAudioPlayerNode()
+    /// 録音と同じ engine (VoiceAudioEngine) に繋いだ時の持ち主。nil なら自分の engine を持つ (今までの動き)。
+    private let host: VoiceAudioEngine?
     let format: AVAudioFormat
     let speed: Double
     private let timePitch: AVAudioUnitTimePitch?
@@ -280,11 +282,13 @@ final class StreamPlayer: @unchecked Sendable {
     private var fileOutFrames = 0
 
     init(sampleRate: Double, outputFile: URL?, volume: Float?, speed: Double = 1,
-         probe: (@Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void)?) throws {
+         probe: (@Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void)?, host: VoiceAudioEngine? = nil) throws {
         guard let f = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1) else {
             throw TTSError.stream("再生の形式を作れません (\(sampleRate) Hz)")
         }
         format = f
+        self.host = outputFile == nil ? host : nil
+        engine = self.host?.engine ?? AVAudioEngine()
         self.speed = speed
         engine.attach(node)
         if abs(speed - 1) > 0.001 {
@@ -308,6 +312,22 @@ final class StreamPlayer: @unchecked Sendable {
             file = try AVAudioFile(forWriting: outputFile, settings: fileSettings,
                                    commonFormat: .pcmFormatFloat32, interleaved: false)
             renderBuffer = AVAudioPCMBuffer(pcmFormat: engine.manualRenderingFormat, frameCapacity: 4096)
+        } else if let host = self.host {
+            // 録音と同じ engine に繋ぐ (VPIO はこの engine の出力を参照信号にしてエコーを消す)。
+            // 音量は mainMixer ではなく自分のノードで下げる (録音側や他の返事に影響しない)。
+            file = nil
+            renderBuffer = nil
+            Self.wire(engine, node, timePitch, f)
+            if let volume { node.volume = max(0, min(volume, 1)) }
+            // 参照信号 (実際に鳴らした音) を host に渡す。測定の probe も同じ所で受ける。
+            last.installTap(onBus: 0, bufferSize: 1024, format: f) { buf, when in
+                host.appendReference(buf, when: when)
+                probe?(buf, when)
+            }
+            tapped = true
+            try host.ensureRunning()
+            node.play()
+            return
         } else {
             file = nil
             renderBuffer = nil
@@ -466,6 +486,13 @@ final class StreamPlayer: @unchecked Sendable {
     func shutdown() {
         if tapped { tapNode.removeTap(onBus: 0); tapped = false }
         node.stop()
-        engine.stop()
+        if host != nil {
+            // 共有の engine は止めない (録音が続いている)。自分のノードだけ外す。
+            if let tp = timePitch { engine.disconnectNodeOutput(tp); engine.detach(tp) }
+            engine.disconnectNodeOutput(node)
+            engine.detach(node)
+        } else {
+            engine.stop()
+        }
     }
 }
