@@ -199,9 +199,19 @@ else
   current="" current_home=""
   want_home=""
   [ "$TALK_HOME" != "$HOME/.claude-talk-mcp" ] && want_home="$TALK_HOME"
-  if out="$("$CLAUDE_BIN" mcp get claude-talk 2>/dev/null)"; then
-    current="$(printf '%s\n' "$out" | sed -n 's/^ *Command: *//p' | head -1)"
-    current_home="$(printf '%s\n' "$out" | sed -n 's/^ *CLAUDE_TALK_HOME=//p' | head -1)"
+  # 今の登録は Claude Code の設定ファイルから読む (`claude mcp get` は MCP サーバーを一度起動してしまうため使わない)
+  cfg="${CLAUDE_CONFIG_DIR:+$CLAUDE_CONFIG_DIR/.claude.json}"; cfg="${cfg:-$HOME/.claude.json}"
+  if [ -f "$cfg" ]; then
+    out="$(/usr/bin/python3 -I -c '
+import json, sys
+try:
+    r = (json.load(open(sys.argv[1])).get("mcpServers") or {}).get("claude-talk") or {}
+except ValueError:
+    r = {}
+print(r.get("command", "")); print((r.get("env") or {}).get("CLAUDE_TALK_HOME", ""))
+' "$cfg")"
+    current="$(printf '%s\n' "$out" | sed -n 1p)"
+    current_home="$(printf '%s\n' "$out" | sed -n 2p)"
   fi
   if [ -z "$current" ]; then
     run "$CLAUDE_BIN" mcp add -s user claude-talk ${MCP_ENV[@]+"${MCP_ENV[@]}"} -- "$MCP_BIN"
@@ -210,8 +220,7 @@ else
     say "  登録済みです: $current${current_home:+ (CLAUDE_TALK_HOME=$current_home)}"
   elif [ "$REPLACE_MCP" = 1 ]; then
     say "  前の登録: $current${current_home:+ (CLAUDE_TALK_HOME=$current_home)}"
-    scope="$(printf '%s\n' "$out" | sed -n 's/.*claude mcp remove claude-talk -s \([a-z]*\).*/\1/p' | head -1)"
-    run "$CLAUDE_BIN" mcp remove claude-talk -s "${scope:-user}"
+    run "$CLAUDE_BIN" mcp remove claude-talk -s user
     run "$CLAUDE_BIN" mcp add -s user claude-talk ${MCP_ENV[@]+"${MCP_ENV[@]}"} -- "$MCP_BIN"
     say "  登録し直しました: $MCP_BIN"
   else
@@ -235,7 +244,7 @@ check_args=(--home "$TALK_HOME" --skills-dir "$SKILLS_DIR" --speech-bin "$SPEECH
 cat <<EOF
 
 完了。次にやること:
-  1. Claude Code を起動し直す (skill と MCP を読み直すため)
+  1. Claude Code を起動し直す (skill と MCP を読み直すため。動いている claude を全部終わらせてから)
   2. /voice と打つ。初回はマイクの許可を聞かれるので、Claude Code を動かしているアプリ (ターミナル / iTerm2 など) を許可
      (システム設定 > プライバシーとセキュリティ > マイク)
   聞き取りの serve (:8766) と読み上げの serve (:8768) は、MCP サーバーが初めて起動した時に自分で立ち上げます。

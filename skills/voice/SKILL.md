@@ -16,7 +16,7 @@ Claude の返答を読み上げ、ユーザーの声を聞き取って、会話�
 これらが見当たらない、または最初の呼び出しがエラー（`isError`）を返す場合は、**ループに入らず**にエラー文を短く伝えて止める。よくある原因:
 - MCP が未登録 → `claude mcp list` に `claude-talk` が無い（リポの `scripts/install.sh` で登録する）
 - マイクの許可が無い → システム設定 > プライバシーとセキュリティ > マイク で、Claude Code を動かしているアプリ（ターミナル・iTerm2 など）を ON にする
-- 音声認識・読み上げのサーバーが立たない → `~/.claude-talk-mcp/direct/serve.log` / `tts-serve-qwen.log` を見る（リポの `scripts/check.sh` で音を出さずに確かめられる）
+- 音声認識・読み上げのサーバーが立たない → `~/.claude-talk-mcp/direct/serve.log` / `tts-serve-qwen.log` を見る（リポの `scripts/check.py` で音を出さずに確かめられる）
 - `mode` が `app` で、メニューバーの音声アプリが起動していない → `~/.claude-talk-mcp/mode` を `direct` にする
 
 ## 会話ループ

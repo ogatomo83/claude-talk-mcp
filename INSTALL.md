@@ -3,6 +3,8 @@
 Claude Code の `/voice` (claude-talk MCP の `speak` / `listen`、読み上げ中の割り込みつき) を新しい Mac に入れる手順。
 ここで入れるのは **direct モード** (MCP サーバー自身が録音・読み上げし、ローカルの speech.cpp に流す)。メニューバーの音声アプリ (`claude-talk-mcp.xcodeproj`) と Qwen3-ASR (`asr/`) は要らない。
 
+手順の入口・「元の Mac と同じ状態か」の確かめ方・声での試し方・うまくいかない時は [README.md](README.md)。ここは中身の詳細。
+
 ## 前提
 
 - **Apple Silicon の Mac** (arm64)。speech.cpp の macOS 版は arm64 だけで、録音・読み上げは macOS の VPIO (Voice Processing I/O) と AVAudioEngine を使う
@@ -66,9 +68,9 @@ scripts/install.sh --serve-test
 | `--skip-speech` / `--skip-build` / `--skip-models` / `--skip-mcp` | その段を飛ばす |
 | `--dry-run` | 何をするかだけ表示 |
 
-確認だけをやり直す: `/usr/bin/python3 -I scripts/check.py [--serve-test]`
+確認だけをやり直す: `/usr/bin/python3 -I scripts/check.py [--strict] [--serve-test]`
 
-`check.py` の登録の確認 (`claude mcp get`) は Claude Code が MCP サーバーを一度起動するので、serve (:8766 / :8768) がまだ無ければその時に立ち上がる (音は出ない。メモリを約 3 GB 使う)。
+`check.py` と `install.sh` は登録を Claude Code の設定ファイル (`~/.claude.json`、`CLAUDE_CONFIG_DIR` があればその下) から読むだけで、MCP サーバーを起動しない (`claude mcp get` / `claude mcp list` は MCP サーバーを一度起動し、serve (:8766 / :8768) がまだ無ければその時に立ち上がる)。`check.py` は最後に、基準 `scripts/reference.json` (元の Mac の状態) と突き合わせる。値の一覧は README.md の手順 5。
 
 ## 動き方 (誰が何を起動するか)
 
