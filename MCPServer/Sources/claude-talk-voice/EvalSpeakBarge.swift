@@ -148,7 +148,7 @@ enum SpeakBargeEval {
         for u in spec.users {
             let clip = try EchoGateEval.load(u)
             let mi = EvalMicInput(echo: [], user: clip)
-            let e = DirectEngine(makeInput: { mi })
+            let e = DirectEngine(makeInput: { mi }, capsReader: AlwaysOnCapsLockReader())
             let t = (try? await e.listen(timeout: 8, locale: "ja-JP")) ?? ""
             let rest = await listenMore(e)
             await e.closeMic(reason: "eval")
@@ -203,7 +203,7 @@ enum SpeakBargeEval {
             let wav = work.appendingPathComponent(c.name + ".wav")
             try EchoGateEval.writeWav(c.mic, to: wav)
             let mi = EvalMicInput(echo: c.echoS, user: c.userS)
-            let engine = DirectEngine(makeInput: { mi }, testSpeakReference: refData)
+            let engine = DirectEngine(makeInput: { mi }, testSpeakReference: refData, capsReader: AlwaysOnCapsLockReader())
             let sw = Stopwatch()
             let out = try await engine.speakOutcome(text: text, voice: nil, rate: nil, locale: "ja-JP")
             let stopMs = Int(out.playedSeconds * 1000)

@@ -95,6 +95,8 @@ scripts/install.sh --serve-test
 | `ttsSpeed` | 1 | 読み上げの速さ (0.5〜2) |
 | `silenceMs` | 500 | 話し終わりとみなす無音 |
 | `bargeIn.enabled` | true | 読み上げ中に話したら止める |
+| `capsLock.enabled` | true | Caps Lock がオンの間だけマイクを入れる (false で今までの動き。許可は要らない) |
+| `capsLock.offMaxWaitSeconds` | 300 | オフのままの `listen` が `caps_lock_off` を返すまでの秒数 |
 
 `keywords.txt` は聞き取り (Haas) の語彙 (`表記=読み,読み`、`-表記` で組み込みから外す)、`readings.txt` は読み上げ前の読み替え (`表記=読み`)。
 

@@ -12,6 +12,10 @@
 //  engine で鳴らす。読み上げの間も VAD + EchoGate で見張り、人の声なら止めて speak を返す (SpeakOutcome.interrupted)。
 //  その発話は次の listen が話し始めから受け取る (handoff)。bargeIn.enabled=false なら今までの動き。
 //
+//  Caps Lock がオンの間だけマイクを入れる (settings の capsLock、既定 on、T-0038。CapsLock.swift):
+//  オフの間の音は聞き取りにも割り込みの見張りにも送らない (0 にする)。オフの間の listen はオンになるまで待ち
+//  (timeout はオンの間だけ数える)、capsLock.offMaxWaitSeconds たってもオフなら caps_lock_off を返す。
+//
 
 import Foundation
 
@@ -39,10 +43,15 @@ public actor DirectEngine {
     private let testReferenceRing = AudioRing(retainSeconds: 15)
     /// 割り込んだ (または読み上げの終わり際に話し始めた) 発話を、次の listen に話し始めから渡す。
     private var handoff: (since: UInt64, at: UInt64, heard: String)?
+    /// Caps Lock の状態 (マイクを開けている間だけ読む)
+    private var capsGate: CapsLockGate?
+    private let capsReader: CapsLockReader?
 
-    public init(makeInput: (@Sendable () throws -> AudioInput)? = nil, testSpeakReference: Data? = nil) {
+    public init(makeInput: (@Sendable () throws -> AudioInput)? = nil, testSpeakReference: Data? = nil,
+                capsReader: CapsLockReader? = nil) {
         customMakeInput = makeInput
         self.testSpeakReference = testSpeakReference
+        self.capsReader = capsReader
         self.makeInput = makeInput ?? {
             if let test = try WavFileInput.fromEnvironment() { return test }
             return MicInput()
@@ -110,6 +119,7 @@ public actor DirectEngine {
         if input == nil, micLock.tryLock() {
             try? startInput(shared: wantBarge, settings: settings)
         }
+        let gate = ensureCapsGate(settings.capsLock)
         speakEndAt = nil
         input?.trigger("speak_start")
         var outcome = SpeakOutcome(finished: false, heardText: text, totalChars: text.count)
@@ -117,7 +127,8 @@ public actor DirectEngine {
         if kind != .avspeech {
             do {
                 if wantBarge, inputShared, let ref = speakReferenceRing {
-                    outcome = try await speakBarge(text: text, kind: kind, settings: settings, reference: ref, sw: sw)
+                    outcome = try await speakBarge(text: text, kind: kind, settings: settings, reference: ref,
+                                                   gate: gate, sw: sw)
                 } else {
                     outcome.finished = try await speakServe(text: text, kind: kind, settings: settings, sw: sw)
                 }
@@ -162,7 +173,7 @@ public actor DirectEngine {
 
     /// 読み上げ中の割り込みあり: 共有 engine で文ごとに鳴らし、並行して VAD + EchoGate で見張る。
     private func speakBarge(text: String, kind: TTSEngineKind, settings: DirectSettings, reference: AudioRing,
-                            sw: Stopwatch) async throws -> SpeakOutcome {
+                            gate: CapsLockGate?, sw: Stopwatch) async throws -> SpeakOutcome {
         let log = self.log
         let firstAudio = FlagBox()
         let lastError = ErrorBox()
@@ -194,7 +205,7 @@ public actor DirectEngine {
         var sentences = splitter.feed(text) + splitter.flush()
         if sentences.isEmpty { sentences = [text] }
         let speakStart = PCM.now()
-        let watch = BargeInWatch(settings: settings, mic: ring, reference: reference, log: log)
+        let watch = BargeInWatch(settings: settings, mic: ring, reference: reference, log: log, capsGate: gate)
         let fired = FireBox()
         let watchTask = Task.detached {
             await watch.run(since: speakStart) { fire in
@@ -288,18 +299,20 @@ public actor DirectEngine {
         let keywords = Vocabulary.load()
         let turn = log.nextTurn()
         let sw = Stopwatch()
-        log.event("listen.recv", mode: .direct, fields: ["timeout": timeout, "keywords": keywords.count,
-                                                         "silence_ms": settings.silenceMs]
-                  .merging(warning.map { ["warning": $0] } ?? [:]) { a, _ in a })
+        var recv: [String: Any] = ["timeout": timeout, "keywords": keywords.count, "silence_ms": settings.silenceMs,
+                                   "caps_lock": settings.capsLock.enabled]
+        if let w = warning { recv["warning"] = w }
+        log.event("listen.recv", mode: .direct, fields: recv)
         busy += 1
         defer {
             busy -= 1
             scheduleIdleClose(after: settings.micIdleCloseSeconds)
         }
         do {
-            let text = try await listenBody(settings: settings, keywords: keywords, timeout: timeout,
-                                            locale: locale, turn: turn, sw: sw)
-            log.event("listen.return", mode: .direct, fields: ["ms": sw.ms, "chars": text.count, "ok": true])
+            let text = try await listenGated(settings: settings, keywords: keywords, timeout: timeout,
+                                             locale: locale, turn: turn, sw: sw)
+            log.event("listen.return", mode: .direct, fields: ["ms": sw.ms, "chars": text.count, "ok": true,
+                                                               "caps_lock_off": text.hasPrefix(CapsLockListen.marker)])
             return text
         } catch {
             log.event("listen.return", mode: .direct, fields: ["ms": sw.ms, "ok": false,
@@ -308,15 +321,66 @@ public actor DirectEngine {
         }
     }
 
-    private func listenBody(settings: DirectSettings, keywords: [String], timeout: Double, locale: String,
-                            turn: Int, sw: Stopwatch) async throws -> String {
-        // 1) マイク (先に開けて、サーバーを待つ間の音もリングに残す)
+    enum BodyResult { case text(String), capsOff(onSeconds: Double) }
+
+    /// Caps Lock の門つきの listen。無効なら今まで通り。有効なら、オフの間はオンになるまで待ち (Realtime は開けない)、
+    /// オンの間に聞く。聞いている途中でオフになり、まだ話していなければ待つ所に戻る (timeout はオンの間だけ数える)。
+    private func listenGated(settings: DirectSettings, keywords: [String], timeout: Double, locale: String,
+                             turn: Int, sw: Stopwatch) async throws -> String {
+        // マイク (先に開けて、サーバーを待つ間・オフで待つ間の音もリングに残す)
         var openedNow = false
         if input == nil {
             guard await micLock.lock(timeout: settings.micLockWaitSeconds) else { throw TalkError.micBusy }
             try startInput(shared: settings.bargeIn.enabled, settings: settings)
             openedNow = true
         }
+        let gate = ensureCapsGate(settings.capsLock)
+        guard let gate else {
+            if case .text(let t) = try await listenBody(settings: settings, keywords: keywords, timeout: timeout,
+                                                        locale: locale, turn: turn, sw: sw, gate: nil,
+                                                        openedNow: openedNow) { return t }
+            return ""
+        }
+        var budget = timeout
+        var waitedTotal = 0.0
+        while true {
+            if !gate.isOn {
+                let w = Stopwatch()
+                log.event("listen.caps_wait", mode: .direct, fields: ["ms": sw.ms])
+                let maxWait = max(settings.capsLock.offMaxWaitSeconds, 1)
+                while !gate.isOn {
+                    try await Task.sleep(nanoseconds: max(settings.capsLock.pollNs, 20_000_000))
+                    if Double(w.ms) / 1000 >= maxWait {
+                        waitedTotal += Double(w.ms) / 1000
+                        log.event("listen.caps_off_return", mode: .direct, fields: ["waited_ms": Int(waitedTotal * 1000)])
+                        return CapsLockListen.text(waitedSeconds: waitedTotal)
+                    }
+                }
+                waitedTotal += Double(w.ms) / 1000
+                log.event("listen.caps_on", mode: .direct, fields: ["waited_ms": w.ms])
+            }
+            switch try await listenBody(settings: settings, keywords: keywords, timeout: budget, locale: locale,
+                                        turn: turn, sw: sw, gate: gate, openedNow: openedNow) {
+            case .text(let t):
+                return t
+            case .capsOff(let used):
+                openedNow = false
+                budget -= used
+                log.event("listen.caps_off", mode: .direct, fields: ["on_s": (used * 10).rounded() / 10,
+                                                                     "budget_s": (budget * 10).rounded() / 10])
+                if budget <= 0 { return "" }
+            }
+        }
+    }
+
+    private func listenBody(settings: DirectSettings, keywords: [String], timeout: Double, locale: String,
+                            turn: Int, sw: Stopwatch, gate: CapsLockGate?, openedNow: Bool) async throws -> BodyResult {
+        // 1) マイクは listenGated で開けてある (取り消しなどで閉じていたら開け直す)
+        if input == nil {
+            guard await micLock.lock(timeout: settings.micLockWaitSeconds) else { throw TalkError.micBusy }
+            try startInput(shared: settings.bargeIn.enabled, settings: settings)
+        }
+        let bodyStart = Date()
         let listenAt = PCM.now()
         input?.trigger("listen")
 
@@ -332,12 +396,18 @@ public actor DirectEngine {
         let usedHandoff = plan.handoff ? handoff : nil
         handoff = nil
         speakEndAt = nil
-        let since = plan.since
+        var since = plan.since
+        // Caps Lock: オンになる前の音は使わない (オンを見つける直前の読みの leadMs 前から)
+        var capsTrimmedMs = 0
+        if let g = gate, let on = g.snapshot.onStart(since: since), on > since {
+            capsTrimmedMs = Int((on - since) / 1_000_000)
+            since = on
+        }
         let nowMic = PCM.now()
         log.event("listen.mic_ready", mode: .direct, fields: [
             "opened_now": openedNow, "input": input?.name ?? "",
             "preroll_ms": nowMic >= since ? Int((nowMic - since) / 1_000_000) : -Int((since - nowMic) / 1_000_000),
-            "tail_guard_ms": plan.guardedMs, "handoff": plan.handoff])
+            "tail_guard_ms": plan.guardedMs, "handoff": plan.handoff, "caps_trimmed_ms": capsTrimmedMs])
 
         // 4) Realtime
         let lang = Self.isoLanguage(locale, fallback: settings.language)
@@ -358,10 +428,10 @@ public actor DirectEngine {
         // 音を送る
         let sender = Task {
             do {
-                for p in sub.backlog { try await rt.append(p.data) }
+                for p in sub.backlog { try await rt.append(await gate?.masked(p).data ?? p.data) }
                 for await p in sub.stream {
                     guard let piece = p.sliced(from: since) else { continue }
-                    try await rt.append(piece.data)
+                    try await rt.append(await gate?.masked(piece).data ?? piece.data)
                 }
             } catch {
                 sig.yield(.failure("\(error.localizedDescription)"))
@@ -416,8 +486,14 @@ public actor DirectEngine {
                     try checkMic(settings: settings, since: checkStart)
                 }
                 let now = Date()
+                // Caps Lock がオフになり、まだ話していない: Realtime を閉じて待つ所に戻る。
+                // 話し始めの知らせ (speech_started) は 0.4〜0.6 秒遅れるので、オフから silenceMs + 1 秒は待つ
+                if let g = gate, !g.isOn, !tracker.heardSpeech, !tracker.speaking, committedForLimit == nil,
+                   g.secondsInState() >= Double(settings.silenceMs) / 1000 + 1.0 {
+                    return .capsOff(onSeconds: max(0, now.timeIntervalSince(bodyStart) - g.secondsInState()))
+                }
                 if let limit = committedForLimit {
-                    if now.timeIntervalSince(limit) > 5 { return tracker.partialText }
+                    if now.timeIntervalSince(limit) > 5 { return .text(tracker.partialText) }
                 } else if let dl = speechDeadline, now > dl {
                     // 話が長すぎる: いったん区切って書き起こし、返す。
                     try? await rt.commit()
@@ -427,7 +503,7 @@ public actor DirectEngine {
                     log.event("asr.timeout", mode: .direct, fields: ["timeout": timeout,
                                                                      "discarded_empty": tracker.discardedEmpty,
                                                                      "discarded_echo": discardedEcho])
-                    return ""
+                    return .text("")
                 }
             case .event(let ev):
                 switch ev {
@@ -468,10 +544,10 @@ public actor DirectEngine {
                         "after_speak_end_ms": v.afterSpeakEndMs, "count": discardedEcho])
                 }
                 if case .finish(let text) = tracker.handle(tracked) {
-                    return stripHandoffEcho(text, handoff: usedHandoff, settings: settings)
+                    return .text(stripHandoffEcho(text, handoff: usedHandoff, settings: settings))
                 }
                 if case .completed = ev, committedForLimit != nil, !tracker.speaking {
-                    return stripHandoffEcho(tracker.partialText, handoff: usedHandoff, settings: settings)
+                    return .text(stripHandoffEcho(tracker.partialText, handoff: usedHandoff, settings: settings))
                 }
             }
         }
@@ -591,6 +667,8 @@ public actor DirectEngine {
 
     public func closeMic(reason: String) {
         guard let inp = input else { return }
+        capsGate?.stop()
+        capsGate = nil
         inp.stop()
         input = nil
         micVerified = false
@@ -599,6 +677,29 @@ public actor DirectEngine {
     }
 
     public var isMicOpen: Bool { input != nil }
+
+    /// Caps Lock の門 (マイクを開けている間だけ読む)。無効なら nil。設定が変わったら作り直す。
+    private func ensureCapsGate(_ s: CapsLockSettings) -> CapsLockGate? {
+        guard s.enabled, input != nil else {
+            capsGate?.stop()
+            capsGate = nil
+            return nil
+        }
+        if let g = capsGate, g.settings == s { return g }
+        capsGate?.stop()
+        let g = CapsLockGate(settings: s, reader: capsReader)
+        let log = self.log
+        let real = capsReader == nil
+        g.onChange = { on in
+            var f: [String: Any] = ["on": on, "source": s.source]
+            // 本物の時は両方の読み方を残す (食い違わないかを後で見る)
+            if real { f["flags"] = FlagsCapsLockReader().isOn(); f["hid"] = HIDCapsLockReader().isOn() }
+            log.event("caps_lock.change", mode: .direct, fields: f)
+        }
+        g.start()
+        capsGate = g
+        return g
+    }
 
     private func scheduleIdleClose(after seconds: Double) {
         idleToken += 1

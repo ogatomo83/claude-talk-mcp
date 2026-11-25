@@ -282,6 +282,8 @@ TTS_PROFILES = {
     "irodori": {"ttsPort": 8767, "ttsModel": "irodori-tts-mf:q5_k", "ttsVoiceName": "irodori-f-low"},
 }
 BARGE_DEFAULTS = {"enabled": True, "bargeInMs": 300, "voiceProcessing": True, "echoFilter": True}
+# CapsLock.swift の既定値 (T-0038)
+CAPS_DEFAULTS = {"enabled": True, "pollMs": 50, "leadMs": 150, "offMaxWaitSeconds": 300, "source": "flags"}
 
 
 def swift_builtin(path, anchor):
@@ -381,6 +383,9 @@ def collect_state(repo, talk_home, skills_dir, speech_bin, mcp_bin):
     barge = dict(BARGE_DEFAULTS)
     barge.update({k: v for k, v in (overrides.get("bargeIn") or {}).items() if k in BARGE_DEFAULTS})
     eff["bargeIn"] = barge
+    caps = dict(CAPS_DEFAULTS)
+    caps.update({k: v for k, v in (overrides.get("capsLock") or {}).items() if k in CAPS_DEFAULTS})
+    eff["capsLock"] = caps
     st["effective_settings"] = eff
     core = os.path.join(repo, "MCPServer", "Sources", "ClaudeTalkCore")
     kw = merge_vocab(swift_builtin(os.path.join(core, "Settings.swift"), "enum Vocabulary"),
@@ -450,6 +455,7 @@ def check_reference(state, ref_path, skill_repo_sha, strict):
            f"語彙 {state['keywords']['count']} 語、読み {state['readings']['count']} 語、"
            f"tts {state['effective_settings']['tts']} / {state['effective_settings']['ttsVoiceName']}、"
            f"bargeIn {'on' if state['effective_settings']['bargeIn']['enabled'] else 'off'}、"
+           f"capsLock {'on' if state['effective_settings']['capsLock']['enabled'] else 'off'}、"
            f"MCP のビルド {state['mcp_source_commit']})")
     else:
         print(f"  基準と違う項目 {diffs} / {n}")

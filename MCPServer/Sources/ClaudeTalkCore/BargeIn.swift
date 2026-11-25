@@ -224,12 +224,16 @@ public final class BargeInWatch: @unchecked Sendable {
     private let lock = NSLock()
     private var tracker: BargeInTracker
     private var _ready = false
+    /// Caps Lock の門 (T-0038)。オフの区間の音は Realtime に送らず (0 にする)、オフの時点では止めない
+    private let capsGate: CapsLockGate?
 
-    public init(settings: DirectSettings, mic: AudioRing, reference: AudioRing?, log: TimingLog = .shared) {
+    public init(settings: DirectSettings, mic: AudioRing, reference: AudioRing?, log: TimingLog = .shared,
+                capsGate: CapsLockGate? = nil) {
         self.settings = settings
         self.mic = mic
         self.reference = reference
         self.log = log
+        self.capsGate = capsGate
         tracker = BargeInTracker(bargeInMs: settings.bargeIn.bargeInMs, recheckMs: settings.bargeIn.echoGate.recheckMs)
     }
 
@@ -246,6 +250,7 @@ public final class BargeInWatch: @unchecked Sendable {
     /// 読み上げを終えた時: 話している途中の発話があり、今までの音で人の声と言えるなら、その話し始め。
     public func voiceStartNearEnd(now: UInt64 = PCM.now()) -> UInt64? {
         guard let start = withTracker({ $0.earliestOpenAudioStart }), now > start + 100_000_000 else { return nil }
+        if let g = capsGate, !g.isOn(at: start) || !g.isOn { return nil }
         let b = settings.bargeIn
         guard b.echoGate.enabled else { return start }
         let ms = Int(min((now - start) / 1_000_000, UInt64(max(b.bargeInMs, 100))))
@@ -276,6 +281,7 @@ public final class BargeInWatch: @unchecked Sendable {
         let sub = mic.subscribe(since: since)
         defer { mic.unsubscribe(sub.id) }
         let sessionStart = sub.backlog.first?.start ?? max(PCM.now(), since)
+        let gate = capsGate
         setReady()
         log.event("speak.barge_watch", mode: .direct, fields: ["ok": true, "ms": sw.ms])
 
@@ -283,10 +289,10 @@ public final class BargeInWatch: @unchecked Sendable {
         let (signals, sig) = AsyncStream<Signal>.makeStream()
         let sender = Task {
             do {
-                for p in sub.backlog { try await rt.append(p.data) }
+                for p in sub.backlog { try await rt.append(await gate?.masked(p).data ?? p.data) }
                 for await p in sub.stream {
                     guard let piece = p.sliced(from: since) else { continue }
-                    try await rt.append(piece.data)
+                    try await rt.append(await gate?.masked(piece).data ?? piece.data)
                 }
             } catch { sig.yield(.failure(error.localizedDescription)) }
         }
@@ -331,6 +337,11 @@ public final class BargeInWatch: @unchecked Sendable {
                 var now = min(PCM.now(), mic.stats.lastDataAt ?? 0)
                 if let r = reference?.stats.lastDataAt, r + 500_000_000 > PCM.now(), r < now { now = r }
                 while let d = withTracker({ $0.nextDue(now: now) }) {
+                    // Caps Lock がオフ (判定の時点か今): 止めない
+                    if let g = gate, !g.isOn(at: d.at) || !g.isOn {
+                        withTracker { $0.rejected(d.item) }
+                        continue
+                    }
                     var verdict: EchoGate.Verdict?
                     if b.echoGate.enabled {
                         let v = EchoGate.evaluateRings(mic: mic, reference: reference, itemAudioStart: d.audioStart,

@@ -53,7 +53,7 @@ let speakTool = Tool(
 
 let listenTool = Tool(
     name: "listen",
-    description: "マイクからユーザーの発話を認識してテキストで返す。話し終わり（無音）またはタイムアウトで確定する。",
+    description: "マイクからユーザーの発話を認識してテキストで返す。話し終わり（無音）またはタイムアウトで確定する。direct モードで Caps Lock の門が有効な時 (既定) は、Caps Lock がオンの間だけ聞く: オフの間はオンになるまで待ち (timeout はオンの間だけ数える)、長くオフのままなら 1 行目が caps_lock_off の文を返す (ユーザーは話していない。何も読み上げずにもう一度 listen を呼ぶ)。",
     inputSchema: .object([
         "type": .string("object"),
         "properties": .object([

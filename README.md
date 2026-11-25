@@ -6,6 +6,7 @@ Claude Code と**日本語の声で会話する** MCP サーバー (`speak` / `l
 - 聞き取り: Haas-ja-v1.0 F16 + Silero VAD (speech.cpp の `speech serve`、:8766)
 - 読み上げ: Qwen3-TTS 0.6B の話者 serena (speech.cpp の `speech serve`、:8768)
 - 読み上げ中に話すと止まる (割り込み、既定 on)。割り込んだ発話は次の `listen` が頭から受け取る
+- **Caps Lock がオンの間だけマイクが入る** (既定 on)。オフの間は聞き取りも割り込みも起きず、`listen` はオンになるまで待つ。macOS の許可は増えない (下の「Caps Lock でマイクを入れる」)
 
 この branch (`direct-mode-speechcpp`) の **direct モード**の手順を下に書く。メニューバーの音声アプリと Qwen3-ASR を使う前の作り (app モード) は末尾の「[app モード (旧)](#app-モード-旧)」。
 
@@ -137,7 +138,7 @@ cd ~/claude-talk-mcp
 | 聞き取りの語彙 | 84 語 (組み込み 9 語 + `keywords.txt`。Docker の読みは「ドッカー」だけ、クラウド・開発・AI のモデル名などのエンジニア用語)。中身の SHA-256 も比べる |
 | 読み上げの読み | 40 語 (組み込みだけ。`readings.txt` は例のコメントのみ) |
 | `settings.json` | `{}` (上書き無し = 全部コードの既定値) |
-| 効いている既定値 | `tts`=qwen、`ttsModel`=qwen3-tts-0.6b、`ttsVoiceName`=serena、`ttsPort`=8768、`port`=8766、`asrModel`=haas-ja-v1.0:f16、`vadModel`=silero-vad、`silenceMs`=500、`ttsSpeed`=1、`bargeIn.enabled`=true、`bargeIn.bargeInMs`=300 |
+| 効いている既定値 | `tts`=qwen、`ttsModel`=qwen3-tts-0.6b、`ttsVoiceName`=serena、`ttsPort`=8768、`port`=8766、`asrModel`=haas-ja-v1.0:f16、`vadModel`=silero-vad、`silenceMs`=500、`ttsSpeed`=1、`bargeIn.enabled`=true、`bargeIn.bargeInMs`=300、`capsLock.enabled`=true |
 | `mode` | direct |
 | MCP サーバー | MCPServer/ の最後の commit `9a5b66d` から、変更なしでビルドしたもの |
 | MCP の登録 | user スコープ、stdio、args 無し、env 無し、コマンドはこのリポのビルド |
@@ -167,6 +168,25 @@ grep '"speak.recv"' ~/.claude-talk-mcp/logs/timing.jsonl | tail -1
 ```
 
 スピーカーで使う時、Claude 自身の声で止まることがある (VPIO のエコー除去で大半は消える)。気になる時はヘッドホンにするか、`settings.json` に `{"bargeIn": {"enabled": false}}` で割り込みを切る (その時 `check.py --strict` は `bargeIn.enabled` の違いを NG にする)。
+
+### Caps Lock でマイクを入れる
+
+Caps Lock がオンの間だけ、マイクの音を聞き取り (`listen`) と読み上げ中の割り込みに使う。オフの間の音は送らない (0 にする)。
+
+- オフの間の `listen`: オンになるまで待つ (`timeout` はオンの間だけ数える)。`capsLock.offMaxWaitSeconds` (既定 300 秒) たってもオフなら、1 行目が `caps_lock_off` の文を返す (skill はもう一度 `listen` を呼ぶ)
+- オンにしてすぐ話しても頭は切れない (オンに気付く直前の読みの `capsLock.leadMs` = 150ms 前の音から使う)
+- 話している途中でオフにしたら、そこまでの発話を返す
+- 状態は 50ms ごとに読みに行く (`CGEventSource.flagsState`)。**入力監視・アクセシビリティの許可は要らない**。負荷は 1 コアの 0.02% ほど (読む処理だけ。50ms ごとに起きる分を足して 0.09% ほど)。マイクを開けている間だけ読む
+- 切る: `settings.json` に `{"capsLock": {"enabled": false}}` (次の `listen` から効く。いつでも聞く、今までの動き)
+- 「入力ソース」の設定で「Caps Lock キーで ABC 入力ソースを切り替える」を入れていると、Caps Lock を短く押しても入力ソースが変わるだけでロックが入らない (長押しで入る)。この使い方ではその設定を切る
+
+ログ:
+
+```sh
+grep -E '"caps_lock.change"|"listen.caps_' ~/.claude-talk-mcp/logs/timing.jsonl | tail -5
+# caps_lock.change {"on":true,"flags":true,"hid":true}  ← オン・オフに気付いた時 (2 つの読み方の値も残す)
+# listen.caps_wait → listen.caps_on {"waited_ms":...}    ← オフで待ち、オンになった
+```
 
 ### うまくいかない時
 
