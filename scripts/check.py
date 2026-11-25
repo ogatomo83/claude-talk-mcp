@@ -382,7 +382,10 @@ def serve_test(mcp_bin, talk_home, speech_bin, asr_port, tts_port, timeout):
                         break
                     time.sleep(0.25)
                 ok(f"テスト用の serve (pid {pid}, :{port}) を止めました")
-        print(f"  (ログ: {work})")
+        if failures:
+            print(f"  (ログ: {work})")
+        else:
+            shutil.rmtree(work, ignore_errors=True)
 
 
 def main():

@@ -194,25 +194,28 @@ MCP_ENV=()
 if [ "$TALK_HOME" != "$HOME/.claude-talk-mcp" ]; then MCP_ENV=(-e "CLAUDE_TALK_HOME=$TALK_HOME"); fi
 if [ "$SKIP_MCP" = 1 ]; then
   say "  飛ばします"
-  say "  手で登録する: claude mcp add -s user ${MCP_ENV[*]+${MCP_ENV[*]} }claude-talk -- $MCP_BIN"
+  say "  手で登録する: claude mcp add -s user claude-talk ${MCP_ENV[*]+${MCP_ENV[*]} }-- $MCP_BIN"
 else
-  current=""
+  current="" current_home=""
+  want_home=""
+  [ "$TALK_HOME" != "$HOME/.claude-talk-mcp" ] && want_home="$TALK_HOME"
   if out="$("$CLAUDE_BIN" mcp get claude-talk 2>/dev/null)"; then
     current="$(printf '%s\n' "$out" | sed -n 's/^ *Command: *//p' | head -1)"
+    current_home="$(printf '%s\n' "$out" | sed -n 's/^ *CLAUDE_TALK_HOME=//p' | head -1)"
   fi
   if [ -z "$current" ]; then
-    run "$CLAUDE_BIN" mcp add -s user ${MCP_ENV[@]+"${MCP_ENV[@]}"} claude-talk -- "$MCP_BIN"
+    run "$CLAUDE_BIN" mcp add -s user claude-talk ${MCP_ENV[@]+"${MCP_ENV[@]}"} -- "$MCP_BIN"
     say "  登録しました: $MCP_BIN"
-  elif [ "$current" = "$MCP_BIN" ]; then
-    say "  登録済みです: $current"
+  elif [ "$current" = "$MCP_BIN" ] && [ "$current_home" = "$want_home" ]; then
+    say "  登録済みです: $current${current_home:+ (CLAUDE_TALK_HOME=$current_home)}"
   elif [ "$REPLACE_MCP" = 1 ]; then
-    say "  前の登録: $current"
+    say "  前の登録: $current${current_home:+ (CLAUDE_TALK_HOME=$current_home)}"
     scope="$(printf '%s\n' "$out" | sed -n 's/.*claude mcp remove claude-talk -s \([a-z]*\).*/\1/p' | head -1)"
     run "$CLAUDE_BIN" mcp remove claude-talk -s "${scope:-user}"
-    run "$CLAUDE_BIN" mcp add -s user ${MCP_ENV[@]+"${MCP_ENV[@]}"} claude-talk -- "$MCP_BIN"
+    run "$CLAUDE_BIN" mcp add -s user claude-talk ${MCP_ENV[@]+"${MCP_ENV[@]}"} -- "$MCP_BIN"
     say "  登録し直しました: $MCP_BIN"
   else
-    say "  別のコマンドで登録済みなので触りません: $current"
+    say "  別のコマンド・設定で登録済みなので触りません: $current${current_home:+ (CLAUDE_TALK_HOME=$current_home)}"
     say "  このビルドに向けるなら --replace-mcp を付けて再実行"
   fi
 fi

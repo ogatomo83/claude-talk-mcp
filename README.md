@@ -2,6 +2,8 @@
 
 macOS で **Claude と日本語の音声で会話**するための仕組み。Claude の返答を macOS の音声で読み上げ（TTS）、あなたの発話をローカルの AI モデル **Qwen3‑ASR** で認識（STT）して Claude に返します。認識はすべてローカル実行で、音声がクラウドに送られることはありません。
 
+> **別の Mac に入れる (direct モード + `/voice`)**: [INSTALL.md](INSTALL.md) の `scripts/install.sh` を使う。下のメニューバーの音声アプリと Qwen3‑ASR は direct モードでは要らない。
+
 ## アーキテクチャ
 
 2 プロセス構成。Claude クライアントが MCP サーバーを stdio で起動し、MCP サーバーは常駐する音声アプリへ Unix ドメインソケット経由でリクエストを転送します。音声アプリは書き起こしをローカルの Qwen3‑ASR HTTP サーバーに委譲します。
