@@ -296,6 +296,21 @@ public final class CapsLockGate: @unchecked Sendable {
     }
 }
 
+/// オフのままの listen の待ち時間 (offMaxWaitSeconds) を測る時計 (ns)。テストでは差し替える。
+///
+/// Mac がスリープしている間も進む時計で測る (T-0042)。DispatchTime.uptimeNanoseconds (mach_absolute_time) と
+/// Task.sleep はスリープ中に止まるので、それで測ると蓋を閉じている間は待ち時間が増えず、起きている時間
+/// (DarkWake の 45 秒ずつなど) だけで offMaxWaitSeconds になるまで返らなかった。
+public protocol CapsWaitClock: Sendable {
+    func nowNs() -> UInt64
+}
+
+/// CLOCK_MONOTONIC (macOS ではスリープ中も進む。mach_continuous_time と同じ)。
+public struct ContinuousCapsWaitClock: CapsWaitClock {
+    public init() {}
+    public func nowNs() -> UInt64 { clock_gettime_nsec_np(CLOCK_MONOTONIC) }
+}
+
 /// listen の返す文の 1 行目 (Caps Lock がオフのままだった)。
 public enum CapsLockListen {
     public static let marker = "caps_lock_off"
