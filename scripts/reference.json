@@ -37,7 +37,7 @@
     "env": [],
     "type": "stdio"
   },
-  "mcp_source_commit": "10f30c1",
+  "mcp_source_commit": "656e92d",
   "mode": "direct",
   "models": {
     "haas-ja-v1.0:f16": {
