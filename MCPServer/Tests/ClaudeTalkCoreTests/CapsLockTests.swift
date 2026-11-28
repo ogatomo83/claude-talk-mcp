@@ -173,6 +173,51 @@ final class CapsLockTests: XCTestCase {
         XCTAssertFalse(log.contains("listen.server_ready"), "オフの間は speech serve を待たない")
     }
 
+    /// スリープ中も待ち時間が進む (T-0042)。蓋を閉じている間 (uptime が止まる間) を、時計を 400 秒進めて真似る。
+    /// 直す前は uptime (Stopwatch) で測っていたので、offMaxWaitSeconds=300 では起きている時間で 300 秒たつまで返らなかった。
+    final class JumpClock: CapsWaitClock, @unchecked Sendable {
+        private let lock = NSLock()
+        private var offset: UInt64 = 0
+        func jump(seconds: Double) { lock.lock(); offset += UInt64(seconds * 1e9); lock.unlock() }
+        func nowNs() -> UInt64 { lock.lock(); defer { lock.unlock() }; return PCM.now() &+ offset }
+    }
+
+    func testListenWhileOffCountsSleepTime() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let direct = dir.appendingPathComponent("direct")
+        try FileManager.default.createDirectory(at: direct, withIntermediateDirectories: true)
+        try #"{"capsLock": {"offMaxWaitSeconds": 300, "pollMs": 20}, "bargeIn": {"enabled": false}, "port": 1}"#
+            .write(to: direct.appendingPathComponent("settings.json"), atomically: true, encoding: .utf8)
+        setenv("CLAUDE_TALK_HOME", dir.path, 1)
+        defer { unsetenv("CLAUDE_TALK_HOME") }
+        TimingLog.shared.enabled = true
+        let clock = JumpClock()
+        let engine = DirectEngine(makeInput: { try WavFileInput(spec: "silent") }, capsReader: FakeReader(false),
+                                  capsWaitClock: clock)
+        let jumper = Task {
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            clock.jump(seconds: 400)   // 蓋を閉じて 400 秒眠った
+        }
+        defer { jumper.cancel() }
+        let sw = Stopwatch()
+        let text = try await engine.listen(timeout: 20, locale: "ja-JP")
+        await engine.closeMic(reason: "test")
+        XCTAssertTrue(text.hasPrefix(CapsLockListen.marker + "\n"), text)
+        XCTAssertLessThan(sw.ms, 5000, "スリープ明けにすぐ caps_lock_off を返す (起きている時間で 300 秒待たない)")
+        XCTAssertTrue(text.contains("(400 秒待ちました)"), text)
+        let log = try String(contentsOf: dir.appendingPathComponent("logs/timing.jsonl"), encoding: .utf8)
+        XCTAssertTrue(log.contains("\"ev\":\"listen.caps_wait_gap\""), log)
+        XCTAssertTrue(log.contains("\"ev\":\"listen.caps_off_return\""), log)
+    }
+
+    func testContinuousClockAdvances() {
+        let c = ContinuousCapsWaitClock()
+        let a = c.nowNs()
+        usleep(20_000)
+        let b = c.nowNs()
+        XCTAssertGreaterThanOrEqual(b - a, 15_000_000)
+    }
+
     func testListenMarkerText() {
         let t = CapsLockListen.text(waitedSeconds: 299.6)
         XCTAssertEqual(t.split(separator: "\n").first, "caps_lock_off")

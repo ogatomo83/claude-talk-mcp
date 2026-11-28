@@ -15,6 +15,7 @@
 //  Caps Lock がオンの間だけマイクを入れる (settings の capsLock、既定 on、T-0038。CapsLock.swift):
 //  オフの間の音は聞き取りにも割り込みの見張りにも送らない (0 にする)。オフの間の listen はオンになるまで待ち
 //  (timeout はオンの間だけ数える)、capsLock.offMaxWaitSeconds たってもオフなら caps_lock_off を返す。
+//  この待ち時間はスリープ中も進む時計で測る (T-0042。CapsWaitClock)。
 //
 
 import Foundation
@@ -46,12 +47,15 @@ public actor DirectEngine {
     /// Caps Lock の状態 (マイクを開けている間だけ読む)
     private var capsGate: CapsLockGate?
     private let capsReader: CapsLockReader?
+    /// オフのままの待ち時間を測る時計 (スリープ中も進む。テストでは差し替える)
+    private let capsWaitClock: CapsWaitClock
 
     public init(makeInput: (@Sendable () throws -> AudioInput)? = nil, testSpeakReference: Data? = nil,
-                capsReader: CapsLockReader? = nil) {
+                capsReader: CapsLockReader? = nil, capsWaitClock: CapsWaitClock = ContinuousCapsWaitClock()) {
         customMakeInput = makeInput
         self.testSpeakReference = testSpeakReference
         self.capsReader = capsReader
+        self.capsWaitClock = capsWaitClock
         self.makeInput = makeInput ?? {
             if let test = try WavFileInput.fromEnvironment() { return test }
             return MicInput()
@@ -345,19 +349,33 @@ public actor DirectEngine {
         var waitedTotal = 0.0
         while true {
             if !gate.isOn {
-                let w = Stopwatch()
+                // 待ち時間はスリープ中も進む時計で測る (uptime の Stopwatch はスリープ中に止まる。T-0042)
+                let clock = capsWaitClock
+                let waitStart = clock.nowNs()
+                func waitedMs() -> Int { Int((clock.nowNs() &- waitStart) / 1_000_000) }
+                let awake = Stopwatch()
                 log.event("listen.caps_wait", mode: .direct, fields: ["ms": sw.ms])
                 let maxWait = max(settings.capsLock.offMaxWaitSeconds, 1)
+                let tickNs = max(settings.capsLock.pollNs, 20_000_000)
+                var prev = waitStart
                 while !gate.isOn {
-                    try await Task.sleep(nanoseconds: max(settings.capsLock.pollNs, 20_000_000))
-                    if Double(w.ms) / 1000 >= maxWait {
-                        waitedTotal += Double(w.ms) / 1000
-                        log.event("listen.caps_off_return", mode: .direct, fields: ["waited_ms": Int(waitedTotal * 1000)])
+                    try await Task.sleep(nanoseconds: tickNs)
+                    let now = clock.nowNs()
+                    // 1 回の眠りが 5 秒以上かかった = Mac がスリープしていた (起きた後に分かるよう残す)
+                    let gapMs = Int((now &- prev) / 1_000_000)
+                    if gapMs >= 5000 {
+                        log.event("listen.caps_wait_gap", mode: .direct, fields: ["gap_ms": gapMs, "waited_ms": waitedMs()])
+                    }
+                    prev = now
+                    if Double(waitedMs()) / 1000 >= maxWait {
+                        waitedTotal += Double(waitedMs()) / 1000
+                        log.event("listen.caps_off_return", mode: .direct, fields: ["waited_ms": Int(waitedTotal * 1000),
+                                                                                     "awake_ms": awake.ms])
                         return CapsLockListen.text(waitedSeconds: waitedTotal)
                     }
                 }
-                waitedTotal += Double(w.ms) / 1000
-                log.event("listen.caps_on", mode: .direct, fields: ["waited_ms": w.ms])
+                waitedTotal += Double(waitedMs()) / 1000
+                log.event("listen.caps_on", mode: .direct, fields: ["waited_ms": waitedMs(), "awake_ms": awake.ms])
             }
             switch try await listenBody(settings: settings, keywords: keywords, timeout: budget, locale: locale,
                                         turn: turn, sw: sw, gate: gate, openedNow: openedNow) {
